@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 
 /* ─── FONTS ──────────────────────────────────────────────────────────────── */
 const fontLink = document.createElement('link');
@@ -118,7 +118,13 @@ function loadData() {
 function saveData(d) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {} }
 
 /* ─── HELPERS ────────────────────────────────────────────────────────────── */
-function getToday() { return new Date().toISOString().split('T')[0]; }
+function getToday() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
 function getDayName(ds) { return ['SUN','MON','TUE','WED','THU','FRI','SAT'][new Date(ds+'T12:00:00').getDay()]; }
 function formatDate(ds) { return new Date(ds+'T12:00:00').toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'}); }
 
@@ -558,7 +564,7 @@ function SubjectDetail({ subjectId, records, stats, myBatch, onBack }) {
   history.sort((a,b)=>b.date.localeCompare(a.date));
 
   const pct=st.pct;
-  // const variant=pct==null?'default':pct>=75?'safe':pct>=60?'warning':'danger';
+  const variant=pct==null?'default':pct>=75?'safe':pct>=60?'warning':'danger';
 
   return (
     <div className="fade-up">
@@ -740,6 +746,25 @@ export default function App() {
   const [data, setData] = useState(() => loadData());
   const [tab, setTab] = useState('today');
   const [settings, setSettings] = useState(false);
+  const [, setTick] = useState(0); // forces re-render when date changes
+
+  // Auto-refresh at midnight so "Today" updates without page reload
+  useEffect(() => {
+    function msUntilMidnight() {
+      const now = new Date();
+      const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1);
+      return midnight - now;
+    }
+    let timeout;
+    function schedule() {
+      timeout = setTimeout(() => {
+        setTick(t => t + 1);
+        schedule(); // reschedule for next midnight
+      }, msUntilMidnight());
+    }
+    schedule();
+    return () => clearTimeout(timeout);
+  }, []);
 
   const { records, notes, myBatch = 'B1' } = data;
   const setRecords = useCallback(r => setData(d=>{ const nd={...d,records:r}; saveData(nd); return nd; }), []);
