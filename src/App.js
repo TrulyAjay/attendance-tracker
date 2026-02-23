@@ -558,7 +558,7 @@ function SubjectDetail({ subjectId, records, stats, myBatch, onBack }) {
   history.sort((a,b)=>b.date.localeCompare(a.date));
 
   const pct=st.pct;
-  const variant=pct==null?'default':pct>=75?'safe':pct>=60?'warning':'danger';
+  // const variant=pct==null?'default':pct>=75?'safe':pct>=60?'warning':'danger';
 
   return (
     <div className="fade-up">
