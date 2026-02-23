@@ -13,6 +13,7 @@ document.head.appendChild(styleEl);
 function applyGlobalStyles(dark) {
   styleEl.textContent = `
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { overflow-x: hidden; }
     body {
       background: ${dark ? '#0f1117' : '#f4f6fb'};
       font-family: 'Poppins', sans-serif;
@@ -109,7 +110,7 @@ const TIMETABLE = {
     { subjectId:'ENGG_MATHS',    time:'11:00–12:00', startH:11, endH:12,  batch:'all' },
     { subjectId:'IEE',           time:'12:00–13:00', startH:12, endH:13,  batch:'all' },
     { subjectId:'IND_CONST',     time:'14:00–15:00', startH:14, endH:15,  batch:'all' },
-    // { subjectId:'ENGG_WORK',     time:'16:00–18:00', startH:16, endH:18,  batch:'all' },
+    { subjectId:'ENGG_WORK',     time:'16:00–18:00', startH:16, endH:18,  batch:'all' },
   ],
 };
 
@@ -1237,14 +1238,15 @@ export default function App() {
                 <div style={{fontSize:11,opacity:0.45}}>B.Tech 1st Year · Sem 2 · AY 2025-26</div>
               </div>
             </div>
-            <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',justifyContent:'flex-end',minWidth:0}}>
               {oPct!=null&&(
                 <div style={{padding:'4px 12px',borderRadius:99,background:oPct>=75?T.greenBg:T.redBg,color:oPct>=75?T.green:T.red,fontFamily:"'DM Mono',monospace",fontWeight:700,fontSize:13,border:`1px solid ${oPct>=75?T.greenBorder:T.redBorder}`}}>
                   {oPct}%
                 </div>
               )}
+
               {unmarkedCount>0&&(
-                <button onClick={()=>setShowBackfill(true)} style={{padding:'4px 10px',borderRadius:99,background:T.amberBg,border:`1px solid ${T.amberBorder}`,color:T.amber,fontWeight:700,fontSize:12,cursor:'pointer'}}>
+                <button onClick={()=>setShowBackfill(true)} style={{padding:'4px 10px',borderRadius:99,background:T.amberBg,border:`1px solid ${T.amberBorder}`,color:T.amber,fontWeight:700,fontSize:12,cursor:'pointer',whiteSpace:'nowrap'}}>
                   {unmarkedCount} unmarked
                 </button>
               )}
