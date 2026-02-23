@@ -530,12 +530,12 @@ function BackfillModal({ myBatch, records, setRecords, holidays, onClose, T }) {
                     return(
                       <div key={idx} style={{
                         background:T.borderLight,borderRadius:12,padding:'12px 14px',
-                        display:'flex',alignItems:'center',gap:12,
+                        display:'flex',flexDirection:'column',gap:10,
                         borderLeft:`3px solid ${subj?.color||T.border}`,
                       }}>
-                        <div style={{flex:1,minWidth:0}}>
+                        <div>
                           <div style={{fontWeight:600,fontSize:13,lineHeight:1.3}}>{subj?.name}</div>
-                          <div style={{fontSize:11,opacity:0.5,marginTop:3,fontFamily:"'DM Mono',monospace"}}>{slot.time} · {slot.batch!=='all'?`Batch ${slot.batch}`:''}</div>
+                          <div style={{fontSize:11,opacity:0.5,marginTop:3,fontFamily:"'DM Mono',monospace"}}>{slot.time}{slot.batch!=='all'?` · Batch ${slot.batch}`:''}</div>
                         </div>
                         <MarkBtns value={val} onChange={v=>mark(slot.subjectId,idx,v)} T={T}/>
                       </div>
