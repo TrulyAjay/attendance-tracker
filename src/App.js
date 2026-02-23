@@ -1310,7 +1310,7 @@ export default function App() {
           <span style={{color:T.amber}}>H = Holiday</span>
         </div>
         <div style={{fontSize:11,fontWeight:500,opacity:0.4,whiteSpace:'nowrap',letterSpacing:'0.2px'}}>
-          Made with ❤️ by Ajay
+          Made with ❤️ by Ajay G
         </div>
       </div>
 
