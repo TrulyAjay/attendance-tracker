@@ -19,42 +19,14 @@ Guru Ghasidas Vishwavidyalaya
 ## Subjects Included
 | Subject | Teacher |
 |---|---|
-| Engineering Chemistry | B. Menesal |
-| Engineering Mathematics A | Ratan Sogi |
-| Intro to Electrical Engineering | Manoj Gupta |
-| Computer Programming | Pradees Patanwar |
-| Environmental Science & Ecology | Manish Bhaskar |
-| Indian Constitution | Vaibhav Kant Singh |
-| Engineering Workshop Practice | Vikas Kumar |
+| Engineering Chemistry | Nidhi Rai |
+| Engineering Mathematics A | Santosh Verma |
+| Introduction to Electrical Engineering | Manoj Gupta |
+| Computer Programming | Vaibhav Kant Singh |
+| Environmental Science & Ecology | Vinod Kumar |
+| Indian Constitution | Vineeta Mam |
+| Engineering Workshop Practice | Manish Bhaskar, Pradeep Patanwar |
 | Computer Programming Lab | Pradees Patanwar |
 | IEE Lab | Manoj Gupta |
-| Engineering Chemistry Lab | B. Menesal |
-| Sports & Yoga | — |
-
-## Running Locally
-
-```bash
-npm install
-npm start
-```
-
-## Deploy to Netlify
-1. Push to GitHub
-2. Connect repo on netlify.com
-3. Build command: `npm run build`
-4. Publish directory: `build`
-5. Done — auto-configured via `netlify.toml`
-
-## Deploy to Vercel
-1. Push to GitHub
-2. Import project on vercel.com
-3. Framework: **Create React App**
-4. Done — auto-configured via `vercel.json`
-
-## Attendance Logic
-- **75%+** → Safe ✓ (shows how many classes you can skip)
-- **60–74%** → Warning ⚠️
-- **<60%** → Critical (shows how many classes needed to reach 75%)
-
-Formula for classes needed:
-> `ceil((75 × total − 100 × present) / 25)`
+| Engineering Chemistry Lab | Nidhi Rai, B. Mandal |
+| Sports & Yoga | Ratin Jogi |
