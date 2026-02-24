@@ -87,7 +87,7 @@ const TIMETABLE = {
     { subjectId:'IEE',           time:'10:00–11:00', startH:10, endH:11,  batch:'all' },
     { subjectId:'ENGG_MATHS',    time:'11:00–12:00', startH:11, endH:12,  batch:'all' },
     { subjectId:'ENGG_CHEM',     time:'12:00–13:00', startH:12, endH:13,  batch:'all' },
-    { subjectId:'COMP_PROG',     time:'14:00–16:00', startH:14, endH:16,  batch:'B1'  },
+    { subjectId:'COMP_PROG_LAB', time:'14:00–16:00', startH:14, endH:16,  batch:'B1'  },
     { subjectId:'IEE_LAB',       time:'14:00–16:00', startH:14, endH:16,  batch:'B2'  },
     { subjectId:'COMP_PROG_LAB', time:'16:00–18:00', startH:16, endH:18,  batch:'B2'  },
   ],
