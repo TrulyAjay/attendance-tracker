@@ -15,15 +15,6 @@ const FIREBASE_CONFIG = {
   appId:             "1:353149264481:web:1cc5135f0a88d4cc024020",
 };
 
-/*
-  ADMIN_WRITE_TOKEN — this secret is embedded in the app and checked by
-  Firebase Security Rules on the server side. Only requests that include
-  this exact token can write to Firestore. Students cannot change it
-  because it lives in the deployed bundle and matches a server-side rule.
-  Change both here AND in firestore.rules if you ever want to rotate it.
-*/
-const ADMIN_WRITE_TOKEN = "ece_ajay_admin_2026";
-
 /* Initialise Firebase — gracefully falls back to offline if config not set */
 let db   = null;
 let FB_OK = false;
@@ -193,11 +184,12 @@ function saveAdminLocal(d) {
 /* ─── FIRESTORE HELPERS ──────────────────────────────────────────────────── */
 /*
   Two documents in Firestore:
-    admin/config        → { pinHash, writeToken, updatedAt }
-    admin/monthlyTotals → { "2026-02": { SUBJ_ID: n }, writeToken, updatedAt }
+    admin/config        → { pinHash, updatedAt }
+    admin/monthlyTotals → { "2026-02": { SUBJ_ID: n }, updatedAt }
 
-  Both are publicly readable. Write is allowed only when writeToken matches
-  ADMIN_WRITE_TOKEN — checked server-side by Firebase Security Rules.
+  Security Rules: entire "admin" collection is open read + write.
+  Real security = admin PIN (only Ajay knows it, SHA-256 hashed).
+  Student attendance data never goes to Firebase — stays on each device.
 */
 
 const FIRESTORE_TIMEOUT_MS = 8000;
@@ -247,9 +239,8 @@ async function pushPinHashToCloud(newHash) {
   try {
     await withTimeout(
       setDoc(doc(db, 'admin', 'config'), {
-        pinHash:    newHash,
-        writeToken: ADMIN_WRITE_TOKEN,
-        updatedAt:  Date.now(),
+        pinHash:   newHash,
+        updatedAt: Date.now(),
       })
     );
   } catch (e) {
@@ -271,8 +262,7 @@ async function pushToFirestore(allMonths) {
     await withTimeout(
       setDoc(doc(db, 'admin', 'monthlyTotals'), {
         ...allMonths,
-        writeToken: ADMIN_WRITE_TOKEN,
-        updatedAt:  Date.now(),
+        updatedAt: Date.now(),
       })
     );
   } catch (e) {
@@ -1531,7 +1521,7 @@ export default function App() {
           // Strip internal fields before exposing to UI
           const clean={};
           Object.entries(raw).forEach(([k,v])=>{
-            if(k==='writeToken'||k==='updatedAt') return;
+            if(k==='updatedAt') return;
             clean[k]=v;
           });
           setCloudTotals(clean);
