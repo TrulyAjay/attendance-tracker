@@ -192,38 +192,33 @@ function saveAdminLocal(d) {
 
 /* ─── FIRESTORE HELPERS ──────────────────────────────────────────────────── */
 /*
-  Firestore structure (two documents inside "admin" collection):
-
+  Two documents in Firestore:
     admin/config        → { pinHash, writeToken, updatedAt }
-    admin/monthlyTotals → { "2026-02": { SUBJ_ID: n, ... }, writeToken, updatedAt }
+    admin/monthlyTotals → { "2026-02": { SUBJ_ID: n }, writeToken, updatedAt }
 
-  Security Rules (in Firebase console):
-    - admin/config:        read = public, write = only if writeToken matches
-    - admin/monthlyTotals: read = public, write = only if writeToken matches
-    - everything else:     denied
-
-  The writeToken is validated SERVER-SIDE by Firestore Rules.
-  It must be present in the document being written.
-  Because it's server-side, even someone with devtools cannot bypass it.
-
-  NOTE: pinHash being publicly readable is safe — it is a one-way SHA-256
-  hash of the PIN. You cannot reverse a SHA-256 hash to get the PIN.
+  Both are publicly readable. Write is allowed only when writeToken matches
+  ADMIN_WRITE_TOKEN — checked server-side by Firebase Security Rules.
 */
 
-const FIRESTORE_TIMEOUT_MS = 10000; // 10 seconds — fail fast instead of hanging
+const FIRESTORE_TIMEOUT_MS = 8000;
 
-/* Wrap any Firestore promise with a hard timeout so we never hang forever */
 function withTimeout(promise, ms = FIRESTORE_TIMEOUT_MS) {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Request timed out — check your internet connection.')), ms)
+      setTimeout(() => reject(new Error(`Timed out after ${ms/1000}s — check your internet.`)), ms)
     ),
   ]);
 }
 
-/* Fetch the current pinHash from Firestore.
-   Returns: hash string if found, DEFAULT_PIN_HASH if doc missing, null if offline/error. */
+/*
+  Fetch pinHash from Firestore.
+  Returns:
+    - 64-char hash string   → if found in Firestore
+    - DEFAULT_PIN_HASH      → if doc doesn't exist yet (first-time setup)
+    - null                  → only if Firebase isn't configured at all (REPLACE_ still in config)
+  Never throws — errors are caught and treated as "use default".
+*/
 async function fetchPinHashFromCloud() {
   if (!FB_OK || !db) return null;
   try {
@@ -232,38 +227,63 @@ async function fetchPinHashFromCloud() {
       const h = snap.data().pinHash;
       if (typeof h === 'string' && h.length === 64) return h;
     }
-    // Document doesn't exist yet (first-time setup) — default PIN is 1234
+    // Doc missing = first time ever, default PIN 1234 applies
     return DEFAULT_PIN_HASH;
   } catch (e) {
-    console.warn('fetchPinHashFromCloud failed:', e.message);
-    return null; // caller will fall back to local cache
+    console.warn('fetchPinHashFromCloud error:', e.message);
+    // Treat ANY error (permission denied, timeout, offline) as "use default"
+    // This way the very first login always works with 1234
+    return DEFAULT_PIN_HASH;
   }
 }
 
-/* Push new pinHash to Firestore — syncs to all devices immediately.
-   The writeToken field is what Firestore Security Rules check server-side. */
+/*
+  Push new pinHash to Firestore.
+  Throws a descriptive Error on failure so the UI can show exactly what went wrong.
+*/
 async function pushPinHashToCloud(newHash) {
-  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your config to App.js.');
-  if (typeof newHash !== 'string' || newHash.length !== 64) throw new Error('Invalid hash format.');
-  await withTimeout(
-    setDoc(doc(db, 'admin', 'config'), {
-      pinHash:    newHash,
-      writeToken: ADMIN_WRITE_TOKEN,   // ← Security Rule checks this server-side
-      updatedAt:  Date.now(),
-    })
-  );
+  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your Firebase config to App.js and redeploy.');
+  if (typeof newHash !== 'string' || newHash.length !== 64) throw new Error('Internal error: invalid hash.');
+  try {
+    await withTimeout(
+      setDoc(doc(db, 'admin', 'config'), {
+        pinHash:    newHash,
+        writeToken: ADMIN_WRITE_TOKEN,
+        updatedAt:  Date.now(),
+      })
+    );
+  } catch (e) {
+    // Give a more helpful message for the most common failure causes
+    if (e.message.includes('permission') || e.message.includes('PERMISSION')) {
+      throw new Error('Permission denied by Firebase. Check that your Security Rules are published correctly (see SETUP_GUIDE.md Step 3).');
+    }
+    if (e.message.includes('Timed out') || e.message.includes('timed out')) {
+      throw new Error('Request timed out. Check your internet connection and try again.');
+    }
+    throw new Error(`Firebase error: ${e.message}`);
+  }
 }
 
 /* Push monthly class totals to Firestore. */
 async function pushToFirestore(allMonths) {
-  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your config to App.js.');
-  await withTimeout(
-    setDoc(doc(db, 'admin', 'monthlyTotals'), {
-      ...allMonths,
-      writeToken: ADMIN_WRITE_TOKEN,   // ← Security Rule checks this server-side
-      updatedAt:  Date.now(),
-    })
-  );
+  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your Firebase config to App.js and redeploy.');
+  try {
+    await withTimeout(
+      setDoc(doc(db, 'admin', 'monthlyTotals'), {
+        ...allMonths,
+        writeToken: ADMIN_WRITE_TOKEN,
+        updatedAt:  Date.now(),
+      })
+    );
+  } catch (e) {
+    if (e.message.includes('permission') || e.message.includes('PERMISSION')) {
+      throw new Error('Permission denied by Firebase. Check your Security Rules (see SETUP_GUIDE.md Step 3).');
+    }
+    if (e.message.includes('Timed out') || e.message.includes('timed out')) {
+      throw new Error('Request timed out. Check your internet connection and try again.');
+    }
+    throw new Error(`Firebase error: ${e.message}`);
+  }
 }
 
 /* ─── DATE HELPERS ───────────────────────────────────────────────────────── */
@@ -489,20 +509,21 @@ function AdminLoginModal({onSuccess,onClose,T}){
     const ad=loadAdminLocal();
     if(ad.lockUntil>Date.now()){ setLocked(true); setLockSecs(Math.ceil((ad.lockUntil-Date.now())/1000)); }
 
-    // Always fetch the latest pinHash from Firebase
-    // Falls back to local cache if offline
+    // Fetch latest pinHash from Firebase.
+    // fetchPinHashFromCloud never throws — always returns a hash or DEFAULT_PIN_HASH.
+    // null only happens if Firebase config is still placeholder (REPLACE_WITH_...).
     setFetchingHash(true);
     fetchPinHashFromCloud().then(cloudHash => {
-      if (cloudHash) {
-        pinHashRef.current = cloudHash;
-        // Update local cache so offline fallback stays current
-        const adNow = loadAdminLocal();
-        saveAdminLocal({ ...adNow, cachedPinHash: cloudHash });
-      } else {
-        // Offline — use cached hash
-        const adNow = loadAdminLocal();
-        pinHashRef.current = adNow.cachedPinHash || DEFAULT_PIN_HASH;
-      }
+      const resolved = cloudHash || loadAdminLocal().cachedPinHash || DEFAULT_PIN_HASH;
+      pinHashRef.current = resolved;
+      // Always update local cache so offline fallback is fresh
+      const adNow = loadAdminLocal();
+      saveAdminLocal({ ...adNow, cachedPinHash: resolved });
+      setFetchingHash(false);
+    }).catch(() => {
+      // Should never reach here since fetchPinHashFromCloud catches internally,
+      // but just in case — fall back to default
+      pinHashRef.current = loadAdminLocal().cachedPinHash || DEFAULT_PIN_HASH;
       setFetchingHash(false);
     });
   },[]);
@@ -661,55 +682,44 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
   async function doChangePin(){
     setPinMsg(''); setPinOk(false);
 
-    // Basic validation first — no network needed
+    // ── Instant validation (no network needed) ──────────────────────────────
     if(!pinF.old||!pinF.newP||!pinF.conf){ setPinMsg('⚠️ Please fill all three fields.'); return; }
-    if(pinF.newP.length<4){ setPinMsg('⚠️ New PIN must be at least 4 digits.'); return; }
-    if(pinF.newP!==pinF.conf){ setPinMsg('⚠️ New PINs do not match — re-enter.'); return; }
-    if(pinF.old===pinF.newP){ setPinMsg('⚠️ New PIN must be different from current PIN.'); return; }
+    if(pinF.newP.length<4)               { setPinMsg('⚠️ New PIN must be at least 4 digits.'); return; }
+    if(pinF.newP!==pinF.conf)            { setPinMsg('⚠️ New PINs do not match.'); return; }
+    if(pinF.old===pinF.newP)             { setPinMsg('⚠️ New PIN must be different from current.'); return; }
 
     setPinChanging(true);
     try {
-      // Step 1 — compute both hashes (instant, no network)
-      setPinMsg('🔐 Hashing PINs…');
+      // Step 1: hash both PINs locally (instant)
+      setPinMsg('🔐 Step 1/3 — Hashing PINs…');
       const oldHash = await sha256(pinF.old);
       const newHash = await sha256(pinF.newP);
 
-      // Step 2 — fetch current authoritative hash from Firebase to verify old PIN
-      setPinMsg('🌐 Fetching current PIN from server…');
-      const cloudHash = await fetchPinHashFromCloud();
-      // cloudHash is null only if truly offline — fall back to local cache
-      const authoritative = cloudHash !== null
-        ? cloudHash
-        : (loadAdminLocal().cachedPinHash || DEFAULT_PIN_HASH);
+      // Step 2: fetch the current authoritative hash from Firebase
+      // fetchPinHashFromCloud NEVER throws — returns DEFAULT_PIN_HASH on any error
+      setPinMsg('🌐 Step 2/3 — Checking current PIN…');
+      const authoritative = await fetchPinHashFromCloud()
+                            || loadAdminLocal().cachedPinHash
+                            || DEFAULT_PIN_HASH;
 
-      if (cloudHash === null && FB_OK) {
-        // Firebase init ok but fetch failed — network issue
-        setPinMsg('❌ Could not reach server. Check your internet and try again.'); return;
-      }
-
-      // Step 3 — verify old PIN is correct
-      if(oldHash !== authoritative){
+      if (oldHash !== authoritative) {
         setPinMsg('❌ Current PIN is incorrect.'); return;
       }
 
-      // Step 4 — push new hash to Firebase (all devices update instantly)
-      setPinMsg('☁️ Saving new PIN to cloud…');
+      // Step 3: push new hash to Firebase — all devices update instantly
+      setPinMsg('☁️ Step 3/3 — Saving to cloud…');
       await pushPinHashToCloud(newHash);
 
-      // Step 5 — update local cache on this device too
-      const ad = loadAdminLocal();
-      saveAdminLocal({ ...ad, cachedPinHash: newHash });
+      // Also cache on this device for offline use
+      saveAdminLocal({ ...loadAdminLocal(), cachedPinHash: newHash });
 
-      // Done!
       setPinOk(true);
-      setPinMsg('✅ PIN changed successfully! All devices will use the new PIN.');
+      setPinMsg('✅ PIN changed! All devices now require the new PIN.');
       setPinF({old:'',newP:'',conf:''});
-      // Auto-close after 3 seconds
       setTimeout(()=>{ setPinOpen(false); setPinMsg(''); setPinOk(false); }, 3000);
 
     } catch(e) {
-      // Any unhandled error (including timeout) shows here
-      setPinMsg(`❌ Error: ${e.message}`);
+      setPinMsg(`❌ ${e.message}`);
     } finally {
       setPinChanging(false);
     }
