@@ -612,8 +612,7 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
       results.push(`WRITE FAILED: [${e.code}] ${e.message}`);
     }
 
-    setTestMsg(results.join('
-'));
+    setTestMsg(results.join('\n'));
   }
 
   // Generate month list from semester start to current month
