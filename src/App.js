@@ -2,7 +2,7 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, onSnapshot, initializeFirestore, CACHE_SIZE_UNLIMITED } from 'firebase/firestore';
 
 /* ── FIREBASE ──────────────────────────────────────────────────────────────── */
 const app = initializeApp({
@@ -13,7 +13,8 @@ const app = initializeApp({
   messagingSenderId: "353149264481",
   appId:             "1:353149264481:web:1cc5135f0a88d4cc024020",
 });
-const db = getFirestore(app);
+// experimentalForceLongPolling fixes "client is offline" on networks/proxies that block WebSockets
+const db = initializeFirestore(app, { experimentalForceLongPolling: true, useFetchStreams: false });
 
 /*
   ADMIN PASSWORD — only you know this.
@@ -276,13 +277,10 @@ function AdminLogin({onSuccess,onClose,t}){
     // Lockout check
     const l=loadLk(); if(l.until>Date.now()){ setLk(true); setSecs(Math.ceil((l.until-Date.now())/1000)); }
     // Fetch current pw hash from Firestore
-    // If doc doesn't exist yet, we hash ADMIN_PW and use that as default
-    import('firebase/firestore').then(({getDoc,doc:fdoc})=>{
-      getDoc(fdoc(db,'totals','adminConfig')).then(snap=>{
-        if(snap.exists()&&snap.data().pwHash) setCloudHash(snap.data().pwHash);
-        else sha256(ADMIN_PW).then(h=>setCloudHash(h));
-      }).catch(()=>sha256(ADMIN_PW).then(h=>setCloudHash(h)));
-    });
+    getDoc(doc(db,'totals','adminConfig')).then(snap=>{
+      if(snap.exists()&&snap.data().pwHash) setCloudHash(snap.data().pwHash);
+      else sha256(ADMIN_PW).then(h=>setCloudHash(h));
+    }).catch(()=>sha256(ADMIN_PW).then(h=>setCloudHash(h)));
   },[]);
 
   useEffect(()=>{
@@ -406,8 +404,7 @@ function AdminPanel({onClose,onLogout,cloudTotals,t}){
     setPwBusy(true);
     try{
       // Fetch current hash from cloud to verify old password
-      const {getDoc,doc:fdoc} = await import('firebase/firestore');
-      const snap=await getDoc(fdoc(db,'totals','adminConfig'));
+      const snap=await getDoc(doc(db,'totals','adminConfig'));
       let currentHash;
       if(snap.exists()&&snap.data().pwHash) currentHash=snap.data().pwHash;
       else currentHash=await sha256(ADMIN_PW); // first time, default pw
