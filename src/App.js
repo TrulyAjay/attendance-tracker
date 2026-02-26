@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 
 /* ══════════════════════════════════════════════════════════════════════════
    🔥 FIREBASE CONFIG — replace with your own values from Firebase console
@@ -162,7 +162,7 @@ const DEFAULT_PIN_HASH = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f9
 
 /* ─── LOCAL STORAGE ──────────────────────────────────────────────────────── */
 const STUDENT_KEY = 'ece_att_v6';
-const ADMIN_KEY   = 'ece_admin_v2';
+const ADMIN_KEY   = 'ece_admin_v3'; // bumped so stale data is ignored
 
 function loadStudentData() {
   try { const r = localStorage.getItem(STUDENT_KEY); if (r) return JSON.parse(r); } catch {}
@@ -170,29 +170,71 @@ function loadStudentData() {
 }
 function saveStudentData(d) { try { localStorage.setItem(STUDENT_KEY, JSON.stringify(d)); } catch {} }
 
+/*
+  Admin local storage holds ONLY lockout data (failCount, lockUntil).
+  pinHash is NOT stored here anymore — it always comes from Firebase.
+  We keep a local pinHash CACHE only as an offline fallback.
+*/
 function loadAdminLocal() {
-  try { const r = localStorage.getItem(ADMIN_KEY); if (r) return JSON.parse(r); } catch {}
-  return { pinHash:DEFAULT_PIN_HASH, lockUntil:0, failCount:0 };
+  try {
+    const r = localStorage.getItem(ADMIN_KEY);
+    if (r) {
+      const parsed = JSON.parse(r);
+      if (parsed && typeof parsed === 'object') return parsed;
+    }
+  } catch {}
+  return { lockUntil: 0, failCount: 0, cachedPinHash: DEFAULT_PIN_HASH };
 }
-function saveAdminLocal(d) { try { localStorage.setItem(ADMIN_KEY, JSON.stringify(d)); } catch {} }
+function saveAdminLocal(d) {
+  try { localStorage.setItem(ADMIN_KEY, JSON.stringify(d)); } catch(e) { console.error('saveAdminLocal failed', e); }
+}
 
 /* ─── FIRESTORE HELPERS ──────────────────────────────────────────────────── */
 /*
-  Structure in Firestore:
-    Collection: "admin"
-    Document:   "monthlyTotals"
-    Fields:     { "2026-02": { ENGG_CHEM: 8, ENGG_MATHS: 9, ... }, "2026-03": {...}, writeToken:"...", updatedAt:... }
+  Firestore structure:
+    admin/config       → { pinHash, writeToken, updatedAt }   ← PIN synced here
+    admin/monthlyTotals → { "2026-02": {...}, writeToken, updatedAt }
 
-  Security:
-    - Read: public (students need it)
-    - Write: server-side rule checks writeToken === ADMIN_WRITE_TOKEN
-             so only the real admin app can write
+  Security Rules:
+    - Read:  public  (login needs pinHash, students need totals)
+    - Write: server checks writeToken === ADMIN_WRITE_TOKEN
 */
+
+/* Fetch the current pinHash from Firestore.
+   Returns the hash string, or null if offline/not configured. */
+async function fetchPinHashFromCloud() {
+  if (!FB_OK || !db) return null;
+  try {
+    const snap = await getDoc(doc(db, 'admin', 'config'));
+    if (snap.exists()) {
+      const h = snap.data().pinHash;
+      if (typeof h === 'string' && h.length === 64) return h;
+    }
+    // Doc doesn't exist yet — first time setup, default PIN applies
+    return DEFAULT_PIN_HASH;
+  } catch (e) {
+    console.warn('fetchPinHashFromCloud failed — using local cache', e);
+    return null;
+  }
+}
+
+/* Push updated pinHash to Firestore so ALL devices pick it up instantly. */
+async function pushPinHashToCloud(newHash) {
+  if (!FB_OK || !db) throw new Error('Firebase not configured — see SETUP_GUIDE.md');
+  if (typeof newHash !== 'string' || newHash.length !== 64) throw new Error('Invalid hash');
+  await setDoc(doc(db, 'admin', 'config'), {
+    pinHash:    newHash,
+    writeToken: ADMIN_WRITE_TOKEN,
+    updatedAt:  Date.now(),
+  });
+}
+
+/* Push monthly totals to Firestore. */
 async function pushToFirestore(allMonths) {
   if (!FB_OK || !db) throw new Error('Firebase not configured — see SETUP_GUIDE.md');
   await setDoc(doc(db, 'admin', 'monthlyTotals'), {
     ...allMonths,
-    writeToken: ADMIN_WRITE_TOKEN,   // validated by Firestore Security Rule
+    writeToken: ADMIN_WRITE_TOKEN,
     updatedAt:  Date.now(),
   });
 }
@@ -409,12 +451,33 @@ function AdminLoginModal({onSuccess,onClose,T}){
   const [loading,setLoading]=useState(false);
   const [locked,setLocked]=useState(false);
   const [lockSecs,setLockSecs]=useState(0);
+  const [fetchingHash,setFetchingHash]=useState(true);
+  // pinHash is always fetched fresh from Firebase — never hardcoded here
+  const pinHashRef = useRef(null);
   const ref=useRef(null);
 
   useEffect(()=>{
     ref.current?.focus();
+    // Check local lockout first
     const ad=loadAdminLocal();
     if(ad.lockUntil>Date.now()){ setLocked(true); setLockSecs(Math.ceil((ad.lockUntil-Date.now())/1000)); }
+
+    // Always fetch the latest pinHash from Firebase
+    // Falls back to local cache if offline
+    setFetchingHash(true);
+    fetchPinHashFromCloud().then(cloudHash => {
+      if (cloudHash) {
+        pinHashRef.current = cloudHash;
+        // Update local cache so offline fallback stays current
+        const adNow = loadAdminLocal();
+        saveAdminLocal({ ...adNow, cachedPinHash: cloudHash });
+      } else {
+        // Offline — use cached hash
+        const adNow = loadAdminLocal();
+        pinHashRef.current = adNow.cachedPinHash || DEFAULT_PIN_HASH;
+      }
+      setFetchingHash(false);
+    });
   },[]);
 
   // Live countdown while locked
@@ -429,22 +492,28 @@ function AdminLoginModal({onSuccess,onClose,T}){
   },[locked]);
 
   async function submit(){
-    if(locked||loading||!pin.trim()) return;
+    if(locked||loading||fetchingHash||!pin.trim()) return;
     setLoading(true);
     try{
-      const ad=loadAdminLocal(), hash=await sha256(pin);
-      if(hash===ad.pinHash){
-        saveAdminLocal({...ad,failCount:0,lockUntil:0});
+      const hash = await sha256(pin);
+      const correctHash = pinHashRef.current;
+      if (!correctHash) { setErr('Could not verify PIN — check your connection.'); return; }
+
+      if(hash === correctHash){
+        // Correct — reset fail count locally
+        const ad=loadAdminLocal();
+        saveAdminLocal({...ad, failCount:0, lockUntil:0});
         setPin(''); onSuccess();
       } else {
+        const ad=loadAdminLocal();
         const fail=(ad.failCount||0)+1;
         if(fail>=3){
           const lu=Date.now()+15*60*1000;
-          saveAdminLocal({...ad,failCount:0,lockUntil:lu});
+          saveAdminLocal({...ad, failCount:0, lockUntil:lu});
           setLocked(true); setLockSecs(900);
           setErr('3 wrong attempts — locked for 15 minutes.');
         } else {
-          saveAdminLocal({...ad,failCount:fail});
+          saveAdminLocal({...ad, failCount:fail});
           setErr(`Incorrect PIN. ${3-fail} attempt${3-fail===1?'':'s'} left before lockout.`);
         }
         setPin('');
@@ -482,12 +551,18 @@ function AdminLoginModal({onSuccess,onClose,T}){
                 textAlign:'center',letterSpacing:12,outline:'none',
                 fontFamily:"'DM Mono',monospace",marginBottom:12,transition:'border-color 0.2s'}}/>
             {err&&<div style={{color:T.red,fontSize:13,textAlign:'center',marginBottom:12,fontWeight:500,lineHeight:1.4}}>{err}</div>}
-            <button onClick={submit} disabled={loading||!pin}
+            {fetchingHash && (
+              <div style={{textAlign:'center',fontSize:13,opacity:0.5,marginBottom:10,display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
+                <span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',background:T.amber,animation:'pulse 1s infinite'}}/>
+                Connecting to server…
+              </div>
+            )}
+            <button onClick={submit} disabled={loading||fetchingHash||!pin}
               style={{width:'100%',padding:14,borderRadius:13,border:'none',background:T.accent,
                 color:'#fff',fontWeight:700,fontSize:15,
-                cursor:pin&&!loading?'pointer':'not-allowed',
-                opacity:pin&&!loading?1:0.45,transition:'opacity 0.2s'}}>
-              {loading?'Verifying…':'Enter Admin Panel →'}
+                cursor:pin&&!loading&&!fetchingHash?'pointer':'not-allowed',
+                opacity:pin&&!loading&&!fetchingHash?1:0.45,transition:'opacity 0.2s'}}>
+              {fetchingHash?'Loading…':loading?'Verifying…':'Enter Admin Panel →'}
             </button>
           </>
         )}
@@ -560,13 +635,34 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
     if(!pinF.old||!pinF.newP||!pinF.conf){ setPinMsg('Please fill all three fields.'); return; }
     if(pinF.newP.length<4){ setPinMsg('New PIN must be at least 4 digits.'); return; }
     if(pinF.newP!==pinF.conf){ setPinMsg('New PINs do not match.'); return; }
-    const oldHash=await sha256(pinF.old);
-    const ad=loadAdminLocal();
-    if(oldHash!==ad.pinHash){ setPinMsg('Current PIN is incorrect.'); return; }
-    saveAdminLocal({...ad,pinHash:await sha256(pinF.newP)});
-    setPinOk(true); setPinMsg('PIN updated successfully ✅');
+
+    // Compute both hashes fully before doing anything
+    const oldHash = await sha256(pinF.old);
+    const newHash = await sha256(pinF.newP);
+
+    // Verify old PIN against Firebase (the single source of truth)
+    setPinMsg('Verifying current PIN…'); setPinOk(false);
+    const cloudHash = await fetchPinHashFromCloud();
+    const authoritative = cloudHash || (loadAdminLocal().cachedPinHash) || DEFAULT_PIN_HASH;
+    if(oldHash !== authoritative){
+      setPinMsg('Current PIN is incorrect.'); return;
+    }
+
+    // Push new hash to Firebase — this updates ALL devices instantly
+    setPinMsg('Saving to cloud…');
+    try {
+      await pushPinHashToCloud(newHash);
+    } catch(e) {
+      setPinMsg(`❌ Cloud save failed: ${e.message}`); return;
+    }
+
+    // Also update local cache so this device works offline
+    const ad = loadAdminLocal();
+    saveAdminLocal({ ...ad, cachedPinHash: newHash });
+
+    setPinOk(true); setPinMsg('✅ PIN updated on all devices!');
     setPinF({old:'',newP:'',conf:''});
-    setTimeout(()=>{ setPinOpen(false); setPinMsg(''); },2200);
+    setTimeout(()=>{ setPinOpen(false); setPinMsg(''); },2500);
   }
 
   const inputStyle={width:'100%',padding:'11px 14px',borderRadius:10,border:`1.5px solid ${T.border}`,background:T.borderLight,color:T.text,fontSize:16,letterSpacing:4,outline:'none',fontFamily:"'DM Mono',monospace",transition:'border-color 0.2s'};
