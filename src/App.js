@@ -192,88 +192,41 @@ function saveAdminLocal(d) {
   Student attendance data never goes to Firebase — stays on each device.
 */
 
-const FIRESTORE_TIMEOUT_MS = 8000;
-
-function withTimeout(promise, ms = FIRESTORE_TIMEOUT_MS) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Timed out after ${ms/1000}s — check your internet.`)), ms)
-    ),
-  ]);
-}
-
-/*
-  Fetch pinHash from Firestore.
-  Returns:
-    - 64-char hash string   → if found in Firestore
-    - DEFAULT_PIN_HASH      → if doc doesn't exist yet (first-time setup)
-    - null                  → only if Firebase isn't configured at all (REPLACE_ still in config)
-  Never throws — errors are caught and treated as "use default".
-*/
+/* ── Firebase read: get pinHash from admin/config ── */
 async function fetchPinHashFromCloud() {
   if (!FB_OK || !db) return null;
   try {
-    const snap = await withTimeout(getDoc(doc(db, 'admin', 'config')));
+    const snap = await getDoc(doc(db, 'admin', 'config'));
     if (snap.exists()) {
       const h = snap.data().pinHash;
       if (typeof h === 'string' && h.length === 64) return h;
     }
-    // Doc missing = first time ever, default PIN 1234 applies
-    return DEFAULT_PIN_HASH;
+    return DEFAULT_PIN_HASH; // doc doesn't exist yet — first run
   } catch (e) {
-    console.warn('fetchPinHashFromCloud error:', e.message);
-    // Treat ANY error (permission denied, timeout, offline) as "use default"
-    // This way the very first login always works with 1234
-    return DEFAULT_PIN_HASH;
+    console.warn('fetchPinHashFromCloud:', e.code, e.message);
+    return DEFAULT_PIN_HASH; // fall back so login always works
   }
 }
 
-/*
-  Push new pinHash to Firestore.
-  Throws a descriptive Error on failure so the UI can show exactly what went wrong.
-*/
+/* ── Firebase write: save pinHash to admin/config ── */
 async function pushPinHashToCloud(newHash) {
-  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your Firebase config to App.js and redeploy.');
-  if (typeof newHash !== 'string' || newHash.length !== 64) throw new Error('Internal error: invalid hash.');
-  try {
-    await withTimeout(
-      setDoc(doc(db, 'admin', 'config'), {
-        pinHash:   newHash,
-        updatedAt: Date.now(),
-      })
-    );
-  } catch (e) {
-    // Give a more helpful message for the most common failure causes
-    if (e.message.includes('permission') || e.message.includes('PERMISSION')) {
-      throw new Error('Permission denied by Firebase. Check that your Security Rules are published correctly (see SETUP_GUIDE.md Step 3).');
-    }
-    if (e.message.includes('Timed out') || e.message.includes('timed out')) {
-      throw new Error('Request timed out. Check your internet connection and try again.');
-    }
-    throw new Error(`Firebase error: ${e.message}`);
-  }
+  if (!FB_OK || !db) throw new Error('Firebase not initialised — check your config.');
+  // Log so we can see in browser console exactly what Firebase returns
+  console.log('pushPinHashToCloud: attempting write…');
+  await setDoc(doc(db, 'admin', 'config'), {
+    pinHash:   newHash,
+    updatedAt: Date.now(),
+  });
+  console.log('pushPinHashToCloud: write succeeded ✅');
 }
 
-/* Push monthly class totals to Firestore. */
+/* ── Firebase write: save monthly totals ── */
 async function pushToFirestore(allMonths) {
-  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your Firebase config to App.js and redeploy.');
-  try {
-    await withTimeout(
-      setDoc(doc(db, 'admin', 'monthlyTotals'), {
-        ...allMonths,
-        updatedAt: Date.now(),
-      })
-    );
-  } catch (e) {
-    if (e.message.includes('permission') || e.message.includes('PERMISSION')) {
-      throw new Error('Permission denied by Firebase. Check your Security Rules (see SETUP_GUIDE.md Step 3).');
-    }
-    if (e.message.includes('Timed out') || e.message.includes('timed out')) {
-      throw new Error('Request timed out. Check your internet connection and try again.');
-    }
-    throw new Error(`Firebase error: ${e.message}`);
-  }
+  if (!FB_OK || !db) throw new Error('Firebase not initialised — check your config.');
+  await setDoc(doc(db, 'admin', 'monthlyTotals'), {
+    ...allMonths,
+    updatedAt: Date.now(),
+  });
 }
 
 /* ─── DATE HELPERS ───────────────────────────────────────────────────────── */
@@ -627,6 +580,41 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
   const [pinMsg,setPinMsg]=useState('');
   const [pinOk,setPinOk]=useState(false);
   const [pinChanging,setPinChanging]=useState(false);
+  const [testMsg,setTestMsg]=useState('');
+
+  // Quick Firebase connection test — runs a real read AND write
+  async function runFirebaseTest(){
+    setTestMsg('⏳ Testing…');
+    const results = [];
+
+    // 1. Check FB_OK flag
+    results.push(`FB_OK = ${FB_OK}`);
+    results.push(`db = ${db ? 'initialised' : 'NULL'}`);
+
+    if (!FB_OK || !db) {
+      setTestMsg('❌ Firebase not initialised. Config missing or wrong.');
+      return;
+    }
+
+    // 2. Test READ
+    try {
+      const snap = await getDoc(doc(db, 'admin', 'config'));
+      results.push(`READ admin/config: OK (exists=${snap.exists()})`);
+    } catch(e) {
+      results.push(`READ FAILED: [${e.code}] ${e.message}`);
+    }
+
+    // 3. Test WRITE
+    try {
+      await setDoc(doc(db, 'admin', 'test'), { ts: Date.now() });
+      results.push('WRITE admin/test: OK');
+    } catch(e) {
+      results.push(`WRITE FAILED: [${e.code}] ${e.message}`);
+    }
+
+    setTestMsg(results.join('
+'));
+  }
 
   // Generate month list from semester start to current month
   const monthOptions=[];
@@ -665,7 +653,9 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
       setSaveState('saved'); setSaveMsg(`✅ Published! All students can now see ${monthLabel(selMonth)} totals.`);
       setTimeout(()=>{ setSaveState('idle'); setSaveMsg(''); },4000);
     } catch(e){
-      setSaveState('error'); setSaveMsg(`❌ Failed: ${e.message}`);
+      const msg = e.code ? `[${e.code}] ${e.message}` : e.message;
+      setSaveState('error'); setSaveMsg(`❌ ${msg}`);
+      console.error('publish error:', e);
     }
   }
 
@@ -680,27 +670,25 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
 
     setPinChanging(true);
     try {
-      // Step 1: hash both PINs locally (instant)
+      // Step 1: hash both PINs (no network needed)
       setPinMsg('🔐 Step 1/3 — Hashing PINs…');
       const oldHash = await sha256(pinF.old);
       const newHash = await sha256(pinF.newP);
 
-      // Step 2: fetch the current authoritative hash from Firebase
-      // fetchPinHashFromCloud NEVER throws — returns DEFAULT_PIN_HASH on any error
-      setPinMsg('🌐 Step 2/3 — Checking current PIN…');
+      // Step 2: verify current PIN against Firebase
+      setPinMsg('🌐 Step 2/3 — Verifying current PIN…');
       const authoritative = await fetchPinHashFromCloud()
                             || loadAdminLocal().cachedPinHash
                             || DEFAULT_PIN_HASH;
-
       if (oldHash !== authoritative) {
         setPinMsg('❌ Current PIN is incorrect.'); return;
       }
 
-      // Step 3: push new hash to Firebase — all devices update instantly
+      // Step 3: write new hash to Firebase
       setPinMsg('☁️ Step 3/3 — Saving to cloud…');
       await pushPinHashToCloud(newHash);
 
-      // Also cache on this device for offline use
+      // Cache on this device too
       saveAdminLocal({ ...loadAdminLocal(), cachedPinHash: newHash });
 
       setPinOk(true);
@@ -709,7 +697,10 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
       setTimeout(()=>{ setPinOpen(false); setPinMsg(''); setPinOk(false); }, 3000);
 
     } catch(e) {
-      setPinMsg(`❌ ${e.message}`);
+      // Show the exact Firebase error so we know what's really wrong
+      const msg = e.code ? `Firebase error [${e.code}]: ${e.message}` : e.message;
+      setPinMsg(`❌ ${msg}`);
+      console.error('doChangePin error:', e);
     } finally {
       setPinChanging(false);
     }
@@ -746,9 +737,32 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
           {/* ── Firebase offline warning ── */}
           {!FB_OK&&(
             <div style={{background:T.amberBg,border:`1px solid ${T.amberBorder}`,borderRadius:12,padding:'12px 16px',color:T.amber,fontSize:13}}>
-              ⚠️ <strong>Firebase not configured yet.</strong> Add your Firebase config to App.js (see SETUP_GUIDE.md), then redeploy. Until then, publish only saves locally and students won't see it.
+              ⚠️ <strong>Firebase not configured yet.</strong> Add your Firebase config to App.js (see SETUP_GUIDE.md), then redeploy.
             </div>
           )}
+
+          {/* ── Firebase connection tester ── */}
+          <div style={{background:T.borderLight,borderRadius:12,padding:'14px 16px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:testMsg?10:0}}>
+              <div>
+                <div style={{fontWeight:600,fontSize:13}}>🔌 Firebase Connection Test</div>
+                <div style={{fontSize:11,opacity:0.45,marginTop:2}}>Run this first if anything isn't working</div>
+              </div>
+              <button onClick={runFirebaseTest}
+                style={{padding:'6px 14px',borderRadius:99,border:`1px solid ${T.accentBorder}`,background:T.accentLight,color:T.accent,fontWeight:600,fontSize:12,cursor:'pointer'}}>
+                Test Now
+              </button>
+            </div>
+            {testMsg&&(
+              <pre style={{margin:0,fontSize:12,fontFamily:"'DM Mono',monospace",whiteSpace:'pre-wrap',
+                background:T.surface,borderRadius:8,padding:'10px 12px',
+                color: testMsg.includes('FAILED') ? T.red : testMsg.includes('⏳') ? T.amber : T.green,
+                border:`1px solid ${testMsg.includes('FAILED') ? T.redBorder : testMsg.includes('⏳') ? T.amberBorder : T.greenBorder}`,
+                lineHeight:1.8}}>
+                {testMsg}
+              </pre>
+            )}
+          </div>
 
           {/* ── Set monthly totals ── */}
           <div>
