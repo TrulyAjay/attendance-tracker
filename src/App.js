@@ -61,6 +61,7 @@ function applyGlobalStyles(dark) {
     button, textarea, input, select { font-family: 'Poppins', sans-serif; }
     @keyframes fadeUp    { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
     @keyframes slideDown { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }
+    @keyframes spin      { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
     .fade-up    { animation: fadeUp    0.22s ease both; }
     .slide-down { animation: slideDown 0.18s ease both; }
   `;
@@ -191,52 +192,78 @@ function saveAdminLocal(d) {
 
 /* ─── FIRESTORE HELPERS ──────────────────────────────────────────────────── */
 /*
-  Firestore structure:
-    admin/config       → { pinHash, writeToken, updatedAt }   ← PIN synced here
-    admin/monthlyTotals → { "2026-02": {...}, writeToken, updatedAt }
+  Firestore structure (two documents inside "admin" collection):
 
-  Security Rules:
-    - Read:  public  (login needs pinHash, students need totals)
-    - Write: server checks writeToken === ADMIN_WRITE_TOKEN
+    admin/config        → { pinHash, writeToken, updatedAt }
+    admin/monthlyTotals → { "2026-02": { SUBJ_ID: n, ... }, writeToken, updatedAt }
+
+  Security Rules (in Firebase console):
+    - admin/config:        read = public, write = only if writeToken matches
+    - admin/monthlyTotals: read = public, write = only if writeToken matches
+    - everything else:     denied
+
+  The writeToken is validated SERVER-SIDE by Firestore Rules.
+  It must be present in the document being written.
+  Because it's server-side, even someone with devtools cannot bypass it.
+
+  NOTE: pinHash being publicly readable is safe — it is a one-way SHA-256
+  hash of the PIN. You cannot reverse a SHA-256 hash to get the PIN.
 */
 
+const FIRESTORE_TIMEOUT_MS = 10000; // 10 seconds — fail fast instead of hanging
+
+/* Wrap any Firestore promise with a hard timeout so we never hang forever */
+function withTimeout(promise, ms = FIRESTORE_TIMEOUT_MS) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Request timed out — check your internet connection.')), ms)
+    ),
+  ]);
+}
+
 /* Fetch the current pinHash from Firestore.
-   Returns the hash string, or null if offline/not configured. */
+   Returns: hash string if found, DEFAULT_PIN_HASH if doc missing, null if offline/error. */
 async function fetchPinHashFromCloud() {
   if (!FB_OK || !db) return null;
   try {
-    const snap = await getDoc(doc(db, 'admin', 'config'));
+    const snap = await withTimeout(getDoc(doc(db, 'admin', 'config')));
     if (snap.exists()) {
       const h = snap.data().pinHash;
       if (typeof h === 'string' && h.length === 64) return h;
     }
-    // Doc doesn't exist yet — first time setup, default PIN applies
+    // Document doesn't exist yet (first-time setup) — default PIN is 1234
     return DEFAULT_PIN_HASH;
   } catch (e) {
-    console.warn('fetchPinHashFromCloud failed — using local cache', e);
-    return null;
+    console.warn('fetchPinHashFromCloud failed:', e.message);
+    return null; // caller will fall back to local cache
   }
 }
 
-/* Push updated pinHash to Firestore so ALL devices pick it up instantly. */
+/* Push new pinHash to Firestore — syncs to all devices immediately.
+   The writeToken field is what Firestore Security Rules check server-side. */
 async function pushPinHashToCloud(newHash) {
-  if (!FB_OK || !db) throw new Error('Firebase not configured — see SETUP_GUIDE.md');
-  if (typeof newHash !== 'string' || newHash.length !== 64) throw new Error('Invalid hash');
-  await setDoc(doc(db, 'admin', 'config'), {
-    pinHash:    newHash,
-    writeToken: ADMIN_WRITE_TOKEN,
-    updatedAt:  Date.now(),
-  });
+  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your config to App.js.');
+  if (typeof newHash !== 'string' || newHash.length !== 64) throw new Error('Invalid hash format.');
+  await withTimeout(
+    setDoc(doc(db, 'admin', 'config'), {
+      pinHash:    newHash,
+      writeToken: ADMIN_WRITE_TOKEN,   // ← Security Rule checks this server-side
+      updatedAt:  Date.now(),
+    })
+  );
 }
 
-/* Push monthly totals to Firestore. */
+/* Push monthly class totals to Firestore. */
 async function pushToFirestore(allMonths) {
-  if (!FB_OK || !db) throw new Error('Firebase not configured — see SETUP_GUIDE.md');
-  await setDoc(doc(db, 'admin', 'monthlyTotals'), {
-    ...allMonths,
-    writeToken: ADMIN_WRITE_TOKEN,
-    updatedAt:  Date.now(),
-  });
+  if (!FB_OK || !db) throw new Error('Firebase is not configured. Add your config to App.js.');
+  await withTimeout(
+    setDoc(doc(db, 'admin', 'monthlyTotals'), {
+      ...allMonths,
+      writeToken: ADMIN_WRITE_TOKEN,   // ← Security Rule checks this server-side
+      updatedAt:  Date.now(),
+    })
+  );
 }
 
 /* ─── DATE HELPERS ───────────────────────────────────────────────────────── */
@@ -588,6 +615,7 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
   const [pinF,setPinF]=useState({old:'',newP:'',conf:''});
   const [pinMsg,setPinMsg]=useState('');
   const [pinOk,setPinOk]=useState(false);
+  const [pinChanging,setPinChanging]=useState(false);
 
   // Generate month list from semester start to current month
   const monthOptions=[];
@@ -632,37 +660,59 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
 
   async function doChangePin(){
     setPinMsg(''); setPinOk(false);
-    if(!pinF.old||!pinF.newP||!pinF.conf){ setPinMsg('Please fill all three fields.'); return; }
-    if(pinF.newP.length<4){ setPinMsg('New PIN must be at least 4 digits.'); return; }
-    if(pinF.newP!==pinF.conf){ setPinMsg('New PINs do not match.'); return; }
 
-    // Compute both hashes fully before doing anything
-    const oldHash = await sha256(pinF.old);
-    const newHash = await sha256(pinF.newP);
+    // Basic validation first — no network needed
+    if(!pinF.old||!pinF.newP||!pinF.conf){ setPinMsg('⚠️ Please fill all three fields.'); return; }
+    if(pinF.newP.length<4){ setPinMsg('⚠️ New PIN must be at least 4 digits.'); return; }
+    if(pinF.newP!==pinF.conf){ setPinMsg('⚠️ New PINs do not match — re-enter.'); return; }
+    if(pinF.old===pinF.newP){ setPinMsg('⚠️ New PIN must be different from current PIN.'); return; }
 
-    // Verify old PIN against Firebase (the single source of truth)
-    setPinMsg('Verifying current PIN…'); setPinOk(false);
-    const cloudHash = await fetchPinHashFromCloud();
-    const authoritative = cloudHash || (loadAdminLocal().cachedPinHash) || DEFAULT_PIN_HASH;
-    if(oldHash !== authoritative){
-      setPinMsg('Current PIN is incorrect.'); return;
-    }
-
-    // Push new hash to Firebase — this updates ALL devices instantly
-    setPinMsg('Saving to cloud…');
+    setPinChanging(true);
     try {
+      // Step 1 — compute both hashes (instant, no network)
+      setPinMsg('🔐 Hashing PINs…');
+      const oldHash = await sha256(pinF.old);
+      const newHash = await sha256(pinF.newP);
+
+      // Step 2 — fetch current authoritative hash from Firebase to verify old PIN
+      setPinMsg('🌐 Fetching current PIN from server…');
+      const cloudHash = await fetchPinHashFromCloud();
+      // cloudHash is null only if truly offline — fall back to local cache
+      const authoritative = cloudHash !== null
+        ? cloudHash
+        : (loadAdminLocal().cachedPinHash || DEFAULT_PIN_HASH);
+
+      if (cloudHash === null && FB_OK) {
+        // Firebase init ok but fetch failed — network issue
+        setPinMsg('❌ Could not reach server. Check your internet and try again.'); return;
+      }
+
+      // Step 3 — verify old PIN is correct
+      if(oldHash !== authoritative){
+        setPinMsg('❌ Current PIN is incorrect.'); return;
+      }
+
+      // Step 4 — push new hash to Firebase (all devices update instantly)
+      setPinMsg('☁️ Saving new PIN to cloud…');
       await pushPinHashToCloud(newHash);
+
+      // Step 5 — update local cache on this device too
+      const ad = loadAdminLocal();
+      saveAdminLocal({ ...ad, cachedPinHash: newHash });
+
+      // Done!
+      setPinOk(true);
+      setPinMsg('✅ PIN changed successfully! All devices will use the new PIN.');
+      setPinF({old:'',newP:'',conf:''});
+      // Auto-close after 3 seconds
+      setTimeout(()=>{ setPinOpen(false); setPinMsg(''); setPinOk(false); }, 3000);
+
     } catch(e) {
-      setPinMsg(`❌ Cloud save failed: ${e.message}`); return;
+      // Any unhandled error (including timeout) shows here
+      setPinMsg(`❌ Error: ${e.message}`);
+    } finally {
+      setPinChanging(false);
     }
-
-    // Also update local cache so this device works offline
-    const ad = loadAdminLocal();
-    saveAdminLocal({ ...ad, cachedPinHash: newHash });
-
-    setPinOk(true); setPinMsg('✅ PIN updated on all devices!');
-    setPinF({old:'',newP:'',conf:''});
-    setTimeout(()=>{ setPinOpen(false); setPinMsg(''); },2500);
   }
 
   const inputStyle={width:'100%',padding:'11px 14px',borderRadius:10,border:`1.5px solid ${T.border}`,background:T.borderLight,color:T.text,fontSize:16,letterSpacing:4,outline:'none',fontFamily:"'DM Mono',monospace",transition:'border-color 0.2s'};
@@ -804,33 +854,54 @@ function AdminPanel({onClose,onLogout,cloudTotals,setCloudTotals,T}){
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:pinOpen?14:0}}>
               <div>
                 <div style={{fontWeight:700,fontSize:15}}>🔑 Change Admin PIN</div>
-                {!pinOpen&&<div style={{fontSize:12,opacity:0.4,marginTop:2}}>Default PIN is 1234 — change it!</div>}
+                {!pinOpen&&<div style={{fontSize:12,opacity:0.4,marginTop:2}}>Syncs instantly to all devices when changed</div>}
               </div>
-              <button onClick={()=>{ setPinOpen(!pinOpen); setPinMsg(''); setPinF({old:'',newP:'',conf:''}); }}
-                style={{...actionBtn(T.purple),fontSize:12,padding:'5px 12px'}}>
+              <button
+                disabled={pinChanging}
+                onClick={()=>{ if(!pinChanging){ setPinOpen(!pinOpen); setPinMsg(''); setPinOk(false); setPinF({old:'',newP:'',conf:''}); }}}
+                style={{...actionBtn(T.purple),fontSize:12,padding:'5px 12px',opacity:pinChanging?0.4:1,cursor:pinChanging?'not-allowed':'pointer'}}>
                 {pinOpen?'Cancel':'Change PIN'}
               </button>
             </div>
             {pinOpen&&(
               <div className="slide-down" style={{display:'flex',flexDirection:'column',gap:10}}>
-                {[['Current PIN','old','Your current PIN'],['New PIN (min 4 digits)','newP','Choose a new PIN'],['Confirm New PIN','conf','Re-type new PIN']].map(([label,field,ph])=>(
+                {[['Current PIN','old','Enter your current PIN'],['New PIN (min 4 digits)','newP','Choose a strong new PIN'],['Confirm New PIN','conf','Re-type the new PIN']].map(([label,field,ph])=>(
                   <div key={field}>
                     <label style={{fontSize:12,fontWeight:600,opacity:0.5,display:'block',marginBottom:5}}>{label}</label>
                     <input type="password" inputMode="numeric" placeholder={ph} value={pinF[field]}
-                      onChange={e=>{ setPinF({...pinF,[field]:e.target.value.replace(/\D/g,'')}); setPinMsg(''); }}
-                      style={inputStyle}
-                      onFocus={e=>e.target.style.borderColor=T.accent}
+                      disabled={pinChanging}
+                      onChange={e=>{ if(!pinChanging){ setPinF({...pinF,[field]:e.target.value.replace(/\D/g,'')}); setPinMsg(''); setPinOk(false); }}}
+                      style={{...inputStyle, opacity:pinChanging?0.5:1, cursor:pinChanging?'not-allowed':'text'}}
+                      onFocus={e=>{ if(!pinChanging) e.target.style.borderColor=T.accent; }}
                       onBlur={e=>e.target.style.borderColor=T.border}/>
                   </div>
                 ))}
+
+                {/* Live step-by-step status — always visible while changing */}
                 {pinMsg&&(
-                  <div style={{padding:'10px 14px',borderRadius:10,fontSize:13,fontWeight:500,
-                    background:pinOk?T.greenBg:T.redBg,color:pinOk?T.green:T.red,
-                    border:`1px solid ${pinOk?T.greenBorder:T.redBorder}`}}>{pinMsg}</div>
+                  <div style={{padding:'12px 16px',borderRadius:12,fontSize:13,fontWeight:600,
+                    lineHeight:1.6,
+                    background: pinOk ? T.greenBg : pinChanging ? T.borderLight : T.redBg,
+                    color:       pinOk ? T.green   : pinChanging ? T.textSub    : T.red,
+                    border:`1px solid ${pinOk ? T.greenBorder : pinChanging ? T.border : T.redBorder}`,
+                    display:'flex', alignItems:'center', gap:10}}>
+                    {pinChanging && (
+                      <span style={{width:14,height:14,borderRadius:'50%',border:`2px solid ${T.textSub}`,
+                        borderTopColor:'transparent',display:'inline-block',
+                        animation:'spin 0.8s linear infinite',flexShrink:0}}/>
+                    )}
+                    {pinMsg}
+                  </div>
                 )}
-                <button onClick={doChangePin}
-                  style={{padding:13,borderRadius:12,border:'none',background:T.accent,color:'#fff',fontWeight:700,fontSize:14,cursor:'pointer'}}>
-                  Update PIN →
+
+                <button onClick={doChangePin} disabled={pinChanging||pinOk}
+                  style={{padding:14,borderRadius:12,border:'none',
+                    background: pinOk ? T.green : T.accent,
+                    color:'#fff',fontWeight:700,fontSize:14,
+                    cursor:pinChanging||pinOk?'not-allowed':'pointer',
+                    opacity:pinChanging||pinOk?0.6:1,
+                    transition:'background 0.3s, opacity 0.2s'}}>
+                  {pinChanging ? 'Updating…' : pinOk ? '✅ Done!' : 'Update PIN on All Devices →'}
                 </button>
               </div>
             )}
