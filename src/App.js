@@ -6,8 +6,8 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
    We use the Firestore REST API directly instead of the Firebase SDK.
    This avoids all WebSocket/offline issues since it's plain HTTPS fetch.
    ────────────────────────────────────────────────────────────────────────── */
-const PROJECT   = 'attendance-tracker-2nd-sem';
-const API_KEY   = 'AIzaSyDy4wQyHngdWoLlprqwKV9AE-7CtFwjbIw';
+const PROJECT   = 'attendance-tracker-2nd-sem-ece';
+const API_KEY   = 'AIzaSyAZ_7xd6xCGFpd_vyO2uT4_czDH_wblusk';
 const BASE      = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents`;
 
 /* Convert JS object → Firestore REST "fields" format */
