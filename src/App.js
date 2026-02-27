@@ -82,24 +82,23 @@ function startPolling(collection, docId, onChange, intervalMs = 10000) {
   return () => clearInterval(t);
 }
 
-/* ── GOOGLE AUTH (Firebase REST) ──────────────────────────────────────────
-   We use Firebase Auth REST API — no SDK needed.
-   Sign in with Google popup → get idToken → exchange for uid + displayName.
-   User data stored in Firestore: users/{uid}/data
+/* ── GOOGLE AUTH ───────────────────────────────────────────────────────────
+   Firebase Auth via popup. Firebase SDK loaded in public/index.html via CDN.
+   window.firebaseAuthReady is a promise that resolves when SDK is loaded.
    ────────────────────────────────────────────────────────────────────────── */
-const AUTH_API  = `https://identitytoolkit.googleapis.com/v1/accounts`;
 
-/* Open Google sign-in popup using Firebase JS SDK (loaded via CDN script tag in index.html) */
+/* Sign in with Google popup — uses Firebase SDK loaded via CDN in index.html */
 async function signInWithGoogle() {
-  // We use the Firebase SDK only for Google popup auth — it's loaded via CDN
-  // The rest of Firestore calls use our own REST functions above
-  const { initializeApp, getApps } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js');
-  const { getAuth, signInWithPopup, GoogleAuthProvider } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js');
+  // Wait for Firebase SDK to be available on window
+  if (!window.firebase) throw new Error('Firebase SDK not loaded yet. Please try again.');
   const cfg = { apiKey: API_KEY, authDomain: `${PROJECT}.firebaseapp.com`, projectId: PROJECT };
-  const app = getApps().length ? getApps()[0] : initializeApp(cfg);
-  const auth = getAuth(app);
-  const provider = new GoogleAuthProvider();
-  const result = await signInWithPopup(auth, provider);
+  // Avoid re-initialising if already done
+  const app = window.firebase.apps?.length
+    ? window.firebase.apps[0]
+    : window.firebase.initializeApp(cfg);
+  const auth = window.firebase.auth(app);
+  const provider = new window.firebase.auth.GoogleAuthProvider();
+  const result = await auth.signInWithPopup(provider);
   return { uid: result.user.uid, name: result.user.displayName, email: result.user.email };
 }
 
