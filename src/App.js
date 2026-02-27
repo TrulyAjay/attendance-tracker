@@ -9,6 +9,10 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 const PROJECT   = 'attendance-tracker-2nd-s-4feb8';
 const API_KEY   = 'AIzaSyBlTBey_GPGVwaWFH7BDTBBCTMK3OVmwxM';
 const BASE      = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents`;
+// Write token — embedded in every write. Firestore Rules verify this matches.
+// Students can READ freely. Only requests with this token can WRITE.
+// Change this string if you ever want to invalidate all existing sessions.
+const WRITE_TOKEN = 'ece_ajay_wt_7x9k2m4p';
 
 /* Convert JS object → Firestore REST "fields" format */
 function toFS(obj) {
@@ -28,6 +32,7 @@ function fromFS(fields) {
   if (!fields) return {};
   const obj = {};
   for (const [k, v] of Object.entries(fields)) {
+    if (k === '_wt') continue; // strip internal write token
     if (v.integerValue !== undefined)  obj[k] = Number(v.integerValue);
     else if (v.doubleValue !== undefined) obj[k] = Number(v.doubleValue);
     else if (v.booleanValue !== undefined) obj[k] = v.booleanValue;
@@ -38,10 +43,11 @@ function fromFS(fields) {
   return obj;
 }
 
-/* Write (PATCH = upsert) a document */
+/* Write (PATCH = upsert) a document — always includes writeToken for Rules verification */
 async function fsSet(collection, docId, data) {
   const url = `${BASE}/${collection}/${docId}?key=${API_KEY}`;
-  const body = JSON.stringify({ fields: toFS(data) });
+  const secured = { ...data, _wt: WRITE_TOKEN }; // Rules check this field
+  const body = JSON.stringify({ fields: toFS(secured) });
   const res = await fetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
   if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || res.statusText); }
   return res.json();
@@ -1038,21 +1044,6 @@ export default function App() {
   const setHolidays = useCallback(h=>setData(d=>{ const nd={...d,holidays:h};       saveS(nd);return nd; }),[]);
   const setMonthlyA = useCallback(m=>setData(d=>{ const nd={...d,monthlyAttendance:m}; saveS(nd);return nd; }),[]);
 
-  /* ── DEBUG: raw Firebase REST test on mount ── */
-  const [dbgMsg,setDbgMsg] = useState('🔄 Testing Firebase REST...');
-  useEffect(()=>{
-    async function test(){
-      try {
-        setDbgMsg('⏳ Writing test doc via REST...');
-        await fsSet('totals','_test',{ts:Date.now(),hello:'world'});
-        setDbgMsg('✅ Firebase REST write SUCCESS! Sync is working.');
-      } catch(e){
-        setDbgMsg('❌ REST error: '+e.message);
-      }
-    }
-    test();
-  },[]);
-
   /* Poll Firestore every 10s for monthly totals — works on all networks */
   useEffect(()=>{
     const stop = startPolling('totals','monthly', data=>{
@@ -1095,11 +1086,6 @@ export default function App() {
 
   return(
     <div style={{minHeight:'100vh',background:th.bg,color:th.text,transition:'background .3s,color .3s'}}>
-
-      {/* ── DEBUG BAR ── */}
-      <div style={{background:dbgMsg.startsWith('✅')?'#064e3b':dbgMsg.startsWith('❌')?'#450a0a':'#1e3a5f',color:dbgMsg.startsWith('✅')?'#10b981':dbgMsg.startsWith('❌')?'#f87171':'#60a5fa',padding:'8px 16px',fontSize:12,fontFamily:"'DM Mono',monospace",textAlign:'center',fontWeight:600,letterSpacing:'0.3px'}}>
-        {dbgMsg}
-      </div>
 
       {/* ── HEADER ── */}
       <div style={{background:th.surface,borderBottom:`1px solid ${th.border}`,position:'sticky',top:0,zIndex:200,boxShadow:'0 1px 6px rgba(0,0,0,.06)',transition:'background .3s,border-color .3s'}}>
