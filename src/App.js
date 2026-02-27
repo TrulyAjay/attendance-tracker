@@ -82,6 +82,78 @@ function startPolling(collection, docId, onChange, intervalMs = 10000) {
   return () => clearInterval(t);
 }
 
+/* ── GOOGLE AUTH (Firebase REST) ──────────────────────────────────────────
+   We use Firebase Auth REST API — no SDK needed.
+   Sign in with Google popup → get idToken → exchange for uid + displayName.
+   User data stored in Firestore: users/{uid}/data
+   ────────────────────────────────────────────────────────────────────────── */
+const AUTH_API  = `https://identitytoolkit.googleapis.com/v1/accounts`;
+
+/* Open Google sign-in popup using Firebase JS SDK (loaded via CDN script tag in index.html) */
+async function signInWithGoogle() {
+  // We use the Firebase SDK only for Google popup auth — it's loaded via CDN
+  // The rest of Firestore calls use our own REST functions above
+  const { initializeApp, getApps } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js');
+  const { getAuth, signInWithPopup, GoogleAuthProvider } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js');
+  const cfg = { apiKey: API_KEY, authDomain: `${PROJECT}.firebaseapp.com`, projectId: PROJECT };
+  const app = getApps().length ? getApps()[0] : initializeApp(cfg);
+  const auth = getAuth(app);
+  const provider = new GoogleAuthProvider();
+  const result = await signInWithPopup(auth, provider);
+  return { uid: result.user.uid, name: result.user.displayName, email: result.user.email };
+}
+
+/* Save user attendance data to Firestore under their UID */
+async function userSave(uid, data) {
+  // User data uses a different write token embedded in the doc
+  const url = `${BASE}/users/${uid}?key=${API_KEY}`;
+  const secured = { ...data, _uwt: uid }; // user's own uid as write token — Rules verify this
+  const body = JSON.stringify({ fields: toFS(secured) });
+  const res = await fetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+  if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || res.statusText); }
+}
+
+/* Load user attendance data from Firestore */
+async function userLoad(uid) {
+  const url = `${BASE}/users/${uid}?key=${API_KEY}`;
+  const res = await fetch(url);
+  if (res.status === 404) return null;
+  if (!res.ok) return null;
+  const json = await res.json();
+  const d = fromFS(json.fields);
+  delete d._uwt;
+  return d;
+}
+
+/* Poll user data every 15s for cross-device sync */
+function startUserPolling(uid, onChange, intervalMs = 15000) {
+  let lastJson = null;
+  async function check() {
+    try {
+      const url = `${BASE}/users/${uid}?key=${API_KEY}`;
+      const res = await fetch(url);
+      if (res.status === 404) return;
+      if (!res.ok) return;
+      const json = await res.json();
+      const str = JSON.stringify(json.fields);
+      if (str !== lastJson) { lastJson = str; const d = fromFS(json.fields); delete d._uwt; onChange(d); }
+    } catch {}
+  }
+  check();
+  const t = setInterval(check, intervalMs);
+  return () => clearInterval(t);
+}
+
+/* ── LOCAL STORAGE for auth state ── */
+const AUTH_KEY = 'ece_auth_v1';
+function loadAuth()  { try { const r=localStorage.getItem(AUTH_KEY); if(r) return JSON.parse(r); } catch{} return null; }
+function saveAuth(d) { try { if(d) localStorage.setItem(AUTH_KEY, JSON.stringify(d)); else localStorage.removeItem(AUTH_KEY); } catch{} }
+
+/* ── LOCAL STORAGE for profile (name + setup done flag) ── */
+const PROFILE_KEY = 'ece_profile_v1';
+function loadProfile()  { try { const r=localStorage.getItem(PROFILE_KEY); if(r) return JSON.parse(r); } catch{} return null; }
+function saveProfile(d) { try { localStorage.setItem(PROFILE_KEY, JSON.stringify(d)); } catch{} }
+
 /*
   ADMIN PASSWORD — only you know this.
   To change it: update this string + ADMIN_PW_KEY below, push to GitHub.
@@ -141,7 +213,7 @@ body{background:${dark?'#0f1117':'#f4f6fb'};font-family:'Poppins',sans-serif;col
 button,textarea,input,select{font-family:'Poppins',sans-serif}
 @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 @keyframes slideDown{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
-@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}@keyframes welcomeIn{from{opacity:0;transform:translateY(32px) scale(.96)}to{opacity:1;transform:translateY(0) scale(1)}}@keyframes welcomeOut{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(-20px) scale(.97)}}
 .fade-up{animation:fadeUp .22s ease both}.slide-down{animation:slideDown .18s ease both}`;
 }
 applyGS(false);
@@ -323,6 +395,137 @@ function SH({title,sub}){ return <div style={{marginBottom:20}}><h2 style={{font
 function navBtn(t){ return {background:t.surface,border:`1px solid ${t.border}`,color:t.text,width:36,height:36,borderRadius:10,cursor:'pointer',fontSize:16,display:'flex',alignItems:'center',justifyContent:'center',transition:'background .3s,border-color .3s'}; }
 function aBtn(color){ return {padding:'7px 14px',borderRadius:99,border:`1px solid ${color}33`,background:`${color}11`,color,fontWeight:600,fontSize:13,cursor:'pointer'}; }
 function Spinner({color}){ return <span style={{width:14,height:14,borderRadius:'50%',border:`2px solid ${color}44`,borderTopColor:color,display:'inline-block',animation:'spin .8s linear infinite',flexShrink:0}}/>; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   WELCOME SCREEN — shown once on first visit
+   ════════════════════════════════════════════════════════════════════════════ */
+function WelcomeScreen({onDone, t}) {
+  const [name,   setName]   = useState('');
+  const [batch,  setBatch]  = useState('');
+  const [step,   setStep]   = useState('form');   // 'form' | 'signing' | 'out'
+  const [err,    setErr]    = useState('');
+  const [signingIn, setSigningIn] = useState(false);
+  const nameRef = useRef(null);
+
+  useEffect(()=>{ setTimeout(()=>nameRef.current?.focus(), 400); },[]);
+
+  function validate() {
+    if (!name.trim()) { setErr('Please enter your name.'); return false; }
+    if (!batch)       { setErr('Please select your batch.'); return false; }
+    return true;
+  }
+
+  function continueAsGuest() {
+    if (!validate()) return;
+    const profile = { name: name.trim(), batch, uid: null, setupDone: true };
+    saveProfile(profile);
+    saveAuth(null);
+    triggerOut(profile, null);
+  }
+
+  async function handleGoogleSignIn() {
+    if (!validate()) return;
+    setSigningIn(true); setErr('');
+    try {
+      const user = await signInWithGoogle();
+      const profile = { name: user.name || name.trim(), batch, uid: user.uid, setupDone: true };
+      saveProfile(profile);
+      saveAuth(user);
+      triggerOut(profile, user);
+    } catch(e) {
+      setErr('Google sign-in failed. Try again or continue as guest.');
+      setSigningIn(false);
+    }
+  }
+
+  function triggerOut(profile, user) {
+    setStep('out');
+    setTimeout(()=> onDone(profile, user), 400);
+  }
+
+  const canSubmit = name.trim() && batch;
+
+  return (
+    <div style={{position:'fixed',inset:0,background:t.bg,zIndex:999,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
+      <div style={{width:'100%',maxWidth:400,animation:step==='out'?'welcomeOut .4s ease forwards':'welcomeIn .5s cubic-bezier(.22,1,.36,1) both'}}>
+
+        {/* Greeting */}
+        <div style={{textAlign:'center',marginBottom:32}}>
+          <div style={{fontSize:52,marginBottom:12}}>👋</div>
+          <h1 style={{fontSize:26,fontWeight:800,letterSpacing:'-.5px',lineHeight:1.2,marginBottom:8}}>Welcome!</h1>
+          <p style={{fontSize:14,opacity:.5,lineHeight:1.6}}>Let's set up your attendance tracker.</p>
+        </div>
+
+        {/* Name input */}
+        <div style={{marginBottom:20}}>
+          <input
+            ref={nameRef}
+            type="text"
+            placeholder="Your Name"
+            value={name}
+            onChange={e=>{setName(e.target.value);setErr('');}}
+            onKeyDown={e=>e.key==='Enter'&&canSubmit&&continueAsGuest()}
+            style={{width:'100%',padding:'15px 18px',borderRadius:14,
+              border:`2px solid ${name.trim()?t.accent:t.border}`,
+              background:t.surface,color:t.text,fontSize:16,fontWeight:500,
+              outline:'none',transition:'border-color .2s',
+              boxShadow:name.trim()?`0 0 0 4px ${t.accent}22`:'none'}}/>
+        </div>
+
+        {/* Batch radio buttons */}
+        <div style={{marginBottom:24}}>
+          <div style={{fontSize:13,fontWeight:600,opacity:.5,marginBottom:12,textAlign:'center',letterSpacing:'.3px'}}>SELECT YOUR BATCH</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+            {['B1','B2'].map(b=>(
+              <button key={b} onClick={()=>{setBatch(b);setErr('');}}
+                style={{padding:'16px 12px',borderRadius:14,cursor:'pointer',fontWeight:700,fontSize:18,
+                  border:`2px solid ${batch===b?t.accent:t.border}`,
+                  background:batch===b?t.accent:t.surface,
+                  color:batch===b?'#fff':t.textSub,
+                  boxShadow:batch===b?`0 4px 20px ${t.accent}44`:'none',
+                  transform:batch===b?'scale(1.03)':'scale(1)',
+                  transition:'all .2s cubic-bezier(.22,1,.36,1)'}}>
+                Batch {b.replace('B','')}
+                {batch===b&&<div style={{fontSize:11,fontWeight:500,marginTop:4,opacity:.8}}>Selected ✓</div>}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Error */}
+        {err&&<div style={{marginBottom:14,padding:'10px 14px',borderRadius:10,background:t.redBg,color:t.red,fontSize:13,fontWeight:500,textAlign:'center',border:`1px solid ${t.redBorder}`}}>{err}</div>}
+
+        {/* Buttons */}
+        <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          <button onClick={continueAsGuest} disabled={signingIn||!canSubmit}
+            style={{width:'100%',padding:'14px',borderRadius:13,border:'none',
+              background:canSubmit?t.accent:'#ccc',color:'#fff',
+              fontWeight:700,fontSize:15,cursor:canSubmit&&!signingIn?'pointer':'not-allowed',
+              opacity:canSubmit?1:.5,transition:'all .2s',
+              boxShadow:canSubmit?`0 4px 20px ${t.accent}44`:'none'}}>
+            Continue as Guest →
+          </button>
+          <button onClick={handleGoogleSignIn} disabled={signingIn||!canSubmit}
+            style={{width:'100%',padding:'14px',borderRadius:13,
+              border:`2px solid ${t.border}`,background:t.surface,
+              color:t.text,fontWeight:600,fontSize:14,
+              cursor:canSubmit&&!signingIn?'pointer':'not-allowed',
+              opacity:canSubmit?1:.5,display:'flex',alignItems:'center',justifyContent:'center',gap:10,transition:'all .2s'}}>
+            {signingIn
+              ? <><Spinner color={t.accent}/> Signing in…</>
+              : <><svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/><path fill="none" d="M0 0h48v48H0z"/></svg>
+                Sign in with Google (sync across devices)</>
+            }
+          </button>
+        </div>
+
+        <p style={{textAlign:'center',fontSize:11,opacity:.3,marginTop:16,lineHeight:1.6}}>
+          Guest data stays on this device only.<br/>Sign in with Google to sync across all your devices.
+        </p>
+      </div>
+    </div>
+  );
+}
 
 /* ════════════════════════════════════════════════════════════════════════════
    ADMIN LOGIN MODAL
@@ -1031,18 +1234,55 @@ export default function App() {
   const [cloudTotals,setCT]     = useState({});
   const [syncOk,setSyncOk]      = useState(false);
   const [,setTick]              = useState(0);
+  // Profile & auth state
+  const [profile,setProfile]    = useState(()=>loadProfile()); // {name,batch,uid,setupDone}
+  const [authUser,setAuthUser]  = useState(()=>loadAuth());    // {uid,name,email} or null
 
   const {records,notes,myBatch='B1',darkMode=false,holidays={},monthlyAttendance={}} = data;
   const th = T(darkMode);
 
   useEffect(()=>{ applyGS(darkMode); },[darkMode]);
 
-  const setRecords  = useCallback(r=>setData(d=>{ const nd={...d,records:r};       saveS(nd);return nd; }),[]);
-  const setNotes    = useCallback(n=>setData(d=>{ const nd={...d,notes:n};          saveS(nd);return nd; }),[]);
-  const setBatch    = useCallback(b=>setData(d=>{ const nd={...d,myBatch:b};        saveS(nd);return nd; }),[]);
-  const setDark     = useCallback(v=>setData(d=>{ const nd={...d,darkMode:v};       saveS(nd);return nd; }),[]);
-  const setHolidays = useCallback(h=>setData(d=>{ const nd={...d,holidays:h};       saveS(nd);return nd; }),[]);
-  const setMonthlyA = useCallback(m=>setData(d=>{ const nd={...d,monthlyAttendance:m}; saveS(nd);return nd; }),[]);
+  // When profile batch changes, sync it to app data
+  useEffect(()=>{
+    if(profile?.batch && profile.batch !== myBatch) {
+      setData(d=>{ const nd={...d,myBatch:profile.batch}; saveS(nd); return nd; });
+    }
+  },[profile]);
+
+  // Cross-device sync: if logged in, poll Firestore for user data
+  useEffect(()=>{
+    if(!authUser?.uid) return;
+    // Load user data from cloud on login
+    userLoad(authUser.uid).then(d=>{
+      if(d && Object.keys(d).length>0){
+        const merged={...loadS(),...d,darkMode:loadS().darkMode};
+        setData(merged); saveS(merged);
+      }
+    });
+    // Poll for changes every 15s
+    const stop = startUserPolling(authUser.uid, d=>{
+      if(!d) return;
+      setData(prev=>{
+        const merged={...prev,...d,darkMode:prev.darkMode};
+        saveS(merged); return merged;
+      });
+    });
+    return stop;
+  },[authUser?.uid]);
+
+  const setRecords  = useCallback(r=>setData(d=>{ const nd={...d,records:r};       saveS(nd); if(authUser?.uid) userSave(authUser.uid,nd).catch(()=>{}); return nd; }),[authUser]);
+  const setNotes    = useCallback(n=>setData(d=>{ const nd={...d,notes:n};          saveS(nd); if(authUser?.uid) userSave(authUser.uid,nd).catch(()=>{}); return nd; }),[authUser]);
+  const setBatch    = useCallback(b=>setData(d=>{ const nd={...d,myBatch:b};        saveS(nd); if(authUser?.uid) userSave(authUser.uid,nd).catch(()=>{}); return nd; }),[authUser]);
+  const setDark     = useCallback(v=>setData(d=>{ const nd={...d,darkMode:v};       saveS(nd); return nd; }),[]);
+  const setHolidays = useCallback(h=>setData(d=>{ const nd={...d,holidays:h};       saveS(nd); if(authUser?.uid) userSave(authUser.uid,nd).catch(()=>{}); return nd; }),[authUser]);
+  const setMonthlyA = useCallback(m=>setData(d=>{ const nd={...d,monthlyAttendance:m}; saveS(nd); if(authUser?.uid) userSave(authUser.uid,nd).catch(()=>{}); return nd; }),[authUser]);
+
+  function handleWelcomeDone(prof, user) {
+    setProfile(prof);
+    setAuthUser(user);
+    if(prof.batch !== myBatch) setBatch(prof.batch);
+  }
 
   /* Poll Firestore every 10s for monthly totals — works on all networks */
   useEffect(()=>{
@@ -1084,6 +1324,11 @@ export default function App() {
     {id:'reports',icon:'📤',label:'Reports'},
   ];
 
+  // Show welcome screen on first visit
+  if(!profile?.setupDone) {
+    return <WelcomeScreen onDone={handleWelcomeDone} t={th}/>;
+  }
+
   return(
     <div style={{minHeight:'100vh',background:th.bg,color:th.text,transition:'background .3s,color .3s'}}>
 
@@ -1094,8 +1339,14 @@ export default function App() {
             <div style={{display:'flex',alignItems:'center',gap:12}}>
               <div style={{width:38,height:38,borderRadius:11,background:th.accent,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}><span style={{fontSize:20}}>📡</span></div>
               <div>
-                <div style={{fontWeight:700,fontSize:16,letterSpacing:'-.3px',lineHeight:1.2}}>ECE Attendance</div>
-                <div style={{fontSize:11,opacity:.45,display:'flex',alignItems:'center',gap:5}}>B.Tech 1st Year · Sem 2 <span style={{width:6,height:6,borderRadius:'50%',background:syncOk?'#10b981':'#f59e0b',display:'inline-block',flexShrink:0}}/></div>
+                {profile?.name
+                  ? <div style={{fontWeight:700,fontSize:16,letterSpacing:'-.3px',lineHeight:1.2}}>Hey, {profile.name.split(' ')[0]} 👋</div>
+                  : <div style={{fontWeight:700,fontSize:16,letterSpacing:'-.3px',lineHeight:1.2}}>ECE Attendance</div>
+                }
+                <div style={{fontSize:11,opacity:.45,display:'flex',alignItems:'center',gap:5}}>
+                  {authUser ? '🔄 Synced · ' : ''}B.Tech 1st Year · Sem 2
+                  <span style={{width:6,height:6,borderRadius:'50%',background:syncOk?'#10b981':'#f59e0b',display:'inline-block',flexShrink:0}}/>
+                </div>
               </div>
             </div>
             <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',justifyContent:'flex-end'}}>
@@ -1118,6 +1369,10 @@ export default function App() {
                 <button onClick={exportData} style={aBtn(th.blue)}>⬇ Export Backup</button>
                 <label style={{...aBtn(th.green),cursor:'pointer'}}>⬆ Import Backup<input type="file" accept=".json" onChange={importData} style={{display:'none'}}/></label>
                 <button onClick={clearAll} style={aBtn(th.red)}>🗑 Clear All Data</button>
+                {authUser
+                  ? <button onClick={()=>{saveAuth(null);setAuthUser(null);const p={...profile,uid:null};saveProfile(p);setProfile(p);}} style={aBtn(th.amber)}>Sign Out</button>
+                  : <button onClick={async()=>{try{const u=await signInWithGoogle();saveAuth(u);setAuthUser(u);const p={...profile,uid:u.uid,name:u.name||profile?.name};saveProfile(p);setProfile(p);}catch(e){alert('Sign-in failed: '+e.message);}}} style={aBtn(th.accent)}>🔄 Sign in to Sync</button>
+                }
               </div>
             </div>
           )}
