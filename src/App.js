@@ -1,20 +1,80 @@
 /* eslint-disable no-unused-vars */
 /* eslint-disable react-hooks/exhaustive-deps */
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, getDoc, onSnapshot, initializeFirestore, CACHE_SIZE_UNLIMITED } from 'firebase/firestore';
 
-/* ── FIREBASE ──────────────────────────────────────────────────────────────── */
-const app = initializeApp({
-  apiKey:            "AIzaSyDy4wQyHngdWoLlprqwKV9AE-7CtFwjbIw",
-  authDomain:        "attendance-tracker-2nd-sem.firebaseapp.com",
-  projectId:         "attendance-tracker-2nd-sem",
-  storageBucket:     "attendance-tracker-2nd-sem.firebasestorage.app",
-  messagingSenderId: "353149264481",
-  appId:             "1:353149264481:web:1cc5135f0a88d4cc024020",
-});
-// experimentalForceLongPolling fixes "client is offline" on networks/proxies that block WebSockets
-const db = initializeFirestore(app, { experimentalForceLongPolling: true, useFetchStreams: false });
+/* ── FIREBASE REST API ─────────────────────────────────────────────────────
+   We use the Firestore REST API directly instead of the Firebase SDK.
+   This avoids all WebSocket/offline issues since it's plain HTTPS fetch.
+   ────────────────────────────────────────────────────────────────────────── */
+const PROJECT   = 'attendance-tracker-2nd-sem';
+const API_KEY   = 'AIzaSyDy4wQyHngdWoLlprqwKV9AE-7CtFwjbIw';
+const BASE      = `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents`;
+
+/* Convert JS object → Firestore REST "fields" format */
+function toFS(obj) {
+  const fields = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'number')  fields[k] = { integerValue: String(v) };
+    else if (typeof v === 'boolean') fields[k] = { booleanValue: v };
+    else if (typeof v === 'object') fields[k] = { mapValue: { fields: toFS(v) } };
+    else fields[k] = { stringValue: String(v) };
+  }
+  return fields;
+}
+
+/* Convert Firestore REST response → plain JS object */
+function fromFS(fields) {
+  if (!fields) return {};
+  const obj = {};
+  for (const [k, v] of Object.entries(fields)) {
+    if (v.integerValue !== undefined)  obj[k] = Number(v.integerValue);
+    else if (v.doubleValue !== undefined) obj[k] = Number(v.doubleValue);
+    else if (v.booleanValue !== undefined) obj[k] = v.booleanValue;
+    else if (v.stringValue !== undefined)  obj[k] = v.stringValue;
+    else if (v.mapValue)   obj[k] = fromFS(v.mapValue.fields);
+    else if (v.nullValue !== undefined) obj[k] = null;
+  }
+  return obj;
+}
+
+/* Write (PATCH = upsert) a document */
+async function fsSet(collection, docId, data) {
+  const url = `${BASE}/${collection}/${docId}?key=${API_KEY}`;
+  const body = JSON.stringify({ fields: toFS(data) });
+  const res = await fetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+  if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || res.statusText); }
+  return res.json();
+}
+
+/* Read a document */
+async function fsGet(collection, docId) {
+  const url = `${BASE}/${collection}/${docId}?key=${API_KEY}`;
+  const res = await fetch(url);
+  if (res.status === 404) return null;
+  if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || res.statusText); }
+  const json = await res.json();
+  return fromFS(json.fields);
+}
+
+/* Poll for changes every 10 seconds (replaces onSnapshot) */
+function startPolling(collection, docId, onChange, intervalMs = 10000) {
+  let lastJson = null;
+  async function check() {
+    try {
+      const url = `${BASE}/${collection}/${docId}?key=${API_KEY}`;
+      const res = await fetch(url);
+      if (res.status === 404) { onChange(null); return; }
+      if (!res.ok) return;
+      const json = await res.json();
+      const str = JSON.stringify(json.fields);
+      if (str !== lastJson) { lastJson = str; onChange(fromFS(json.fields)); }
+    } catch {}
+  }
+  check();
+  const t = setInterval(check, intervalMs);
+  return () => clearInterval(t);
+}
 
 /*
   ADMIN PASSWORD — only you know this.
@@ -26,10 +86,9 @@ const ADMIN_PW = "Ajay@2026";
 /*
   Firestore has ONE document: totals/monthly
   Shape: { "2026-02": { ENGG_CHEM:8, ENGG_MATHS:9, … }, "2026-03":{…} }
-  Rules: open read+write (Rules tab in Firebase already set this way)
 */
 async function cloudSave(data) {
-  await setDoc(doc(db, 'totals', 'monthly'), data);
+  await fsSet('totals', 'monthly', data);
 }
 
 /* ── LOCAL STORAGE ─────────────────────────────────────────────────────────── */
@@ -60,7 +119,7 @@ async function sha256(text) {
 /* Save hashed password to Firestore so all devices get it */
 async function cloudSavePw(newPw) {
   const hash = await sha256(newPw);
-  await setDoc(doc(db, 'totals', 'adminConfig'), { pwHash: hash });
+  await fsSet('totals', 'adminConfig', { pwHash: hash });
 }
 
 /* ── STYLES ────────────────────────────────────────────────────────────────── */
@@ -277,8 +336,8 @@ function AdminLogin({onSuccess,onClose,t}){
     // Lockout check
     const l=loadLk(); if(l.until>Date.now()){ setLk(true); setSecs(Math.ceil((l.until-Date.now())/1000)); }
     // Fetch current pw hash from Firestore
-    getDoc(doc(db,'totals','adminConfig')).then(snap=>{
-      if(snap.exists()&&snap.data().pwHash) setCloudHash(snap.data().pwHash);
+    fsGet('totals','adminConfig').then(data=>{
+      if(data&&data.pwHash) setCloudHash(data.pwHash);
       else sha256(ADMIN_PW).then(h=>setCloudHash(h));
     }).catch(()=>sha256(ADMIN_PW).then(h=>setCloudHash(h)));
   },[]);
@@ -404,9 +463,9 @@ function AdminPanel({onClose,onLogout,cloudTotals,t}){
     setPwBusy(true);
     try{
       // Fetch current hash from cloud to verify old password
-      const snap=await getDoc(doc(db,'totals','adminConfig'));
+      const data=await fsGet('totals','adminConfig');
       let currentHash;
-      if(snap.exists()&&snap.data().pwHash) currentHash=snap.data().pwHash;
+      if(data&&data.pwHash) currentHash=data.pwHash;
       else currentHash=await sha256(ADMIN_PW); // first time, default pw
       const oldHash=await sha256(pwOld);
       if(oldHash!==currentHash){setPwMsg('❌ Current password is incorrect.'); return;}
@@ -979,36 +1038,32 @@ export default function App() {
   const setHolidays = useCallback(h=>setData(d=>{ const nd={...d,holidays:h};       saveS(nd);return nd; }),[]);
   const setMonthlyA = useCallback(m=>setData(d=>{ const nd={...d,monthlyAttendance:m}; saveS(nd);return nd; }),[]);
 
-  /* ── DEBUG: raw Firebase test on mount ── */
-  const [dbgMsg,setDbgMsg] = useState('🔄 Testing Firebase...');
+  /* ── DEBUG: raw Firebase REST test on mount ── */
+  const [dbgMsg,setDbgMsg] = useState('🔄 Testing Firebase REST...');
   useEffect(()=>{
     async function test(){
       try {
-        setDbgMsg('⏳ Writing test doc...');
-        await setDoc(doc(db,'totals','_test'),{ts:Date.now(),hello:'world'});
-        setDbgMsg('✅ Firebase write SUCCESS! Sync is working.');
+        setDbgMsg('⏳ Writing test doc via REST...');
+        await fsSet('totals','_test',{ts:Date.now(),hello:'world'});
+        setDbgMsg('✅ Firebase REST write SUCCESS! Sync is working.');
       } catch(e){
-        setDbgMsg(`❌ Firebase error: [${e.code}] ${e.message}`);
+        setDbgMsg('❌ REST error: '+e.message);
       }
     }
     test();
   },[]);
 
-  /* Live listener — fires instantly on every device when admin publishes */
+  /* Poll Firestore every 10s for monthly totals — works on all networks */
   useEffect(()=>{
-    const unsub = onSnapshot(
-      doc(db,'totals','monthly'),
-      snap=>{
-        if(snap.exists()){
-          const raw=snap.data(), clean={};
-          Object.entries(raw).forEach(([k,v])=>{ if(/^\d{4}-\d{2}$/.test(k)) clean[k]=v; });
-          setCT(clean);
-        }
-        setSyncOk(true);
-      },
-      err=>{ console.error('Firestore listener error:',err); setSyncOk(false); }
-    );
-    return ()=>unsub();
+    const stop = startPolling('totals','monthly', data=>{
+      if(data){
+        const clean={};
+        Object.entries(data).forEach(([k,v])=>{ if(/^\d{4}-\d{2}$/.test(k)) clean[k]=v; });
+        setCT(clean);
+      }
+      setSyncOk(true);
+    }, 10000);
+    return stop;
   },[]);
 
   /* Midnight refresh */
