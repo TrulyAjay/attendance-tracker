@@ -979,6 +979,21 @@ export default function App() {
   const setHolidays = useCallback(h=>setData(d=>{ const nd={...d,holidays:h};       saveS(nd);return nd; }),[]);
   const setMonthlyA = useCallback(m=>setData(d=>{ const nd={...d,monthlyAttendance:m}; saveS(nd);return nd; }),[]);
 
+  /* ── DEBUG: raw Firebase test on mount ── */
+  const [dbgMsg,setDbgMsg] = useState('🔄 Testing Firebase...');
+  useEffect(()=>{
+    async function test(){
+      try {
+        setDbgMsg('⏳ Writing test doc...');
+        await setDoc(doc(db,'totals','_test'),{ts:Date.now(),hello:'world'});
+        setDbgMsg('✅ Firebase write SUCCESS! Sync is working.');
+      } catch(e){
+        setDbgMsg(`❌ Firebase error: [${e.code}] ${e.message}`);
+      }
+    }
+    test();
+  },[]);
+
   /* Live listener — fires instantly on every device when admin publishes */
   useEffect(()=>{
     const unsub = onSnapshot(
@@ -1025,6 +1040,11 @@ export default function App() {
 
   return(
     <div style={{minHeight:'100vh',background:th.bg,color:th.text,transition:'background .3s,color .3s'}}>
+
+      {/* ── DEBUG BAR ── */}
+      <div style={{background:dbgMsg.startsWith('✅')?'#064e3b':dbgMsg.startsWith('❌')?'#450a0a':'#1e3a5f',color:dbgMsg.startsWith('✅')?'#10b981':dbgMsg.startsWith('❌')?'#f87171':'#60a5fa',padding:'8px 16px',fontSize:12,fontFamily:"'DM Mono',monospace",textAlign:'center',fontWeight:600,letterSpacing:'0.3px'}}>
+        {dbgMsg}
+      </div>
 
       {/* ── HEADER ── */}
       <div style={{background:th.surface,borderBottom:`1px solid ${th.border}`,position:'sticky',top:0,zIndex:200,boxShadow:'0 1px 6px rgba(0,0,0,.06)',transition:'background .3s,border-color .3s'}}>
