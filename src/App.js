@@ -87,19 +87,27 @@ function startPolling(collection, docId, onChange, intervalMs = 10000) {
    window.firebaseAuthReady is a promise that resolves when SDK is loaded.
    ────────────────────────────────────────────────────────────────────────── */
 
-/* Sign in with Google popup — uses Firebase SDK loaded via CDN in index.html */
+/* Sign in with Google popup — uses Firebase compat SDK loaded via CDN in index.html */
 async function signInWithGoogle() {
-  // Wait for Firebase SDK to be available on window
-  if (!window.firebase) throw new Error('Firebase SDK not loaded yet. Please try again.');
+  if (!window.firebase) throw new Error('Firebase SDK not loaded. Please refresh and try again.');
   const cfg = { apiKey: API_KEY, authDomain: `${PROJECT}.firebaseapp.com`, projectId: PROJECT };
-  // Avoid re-initialising if already done
-  const app = window.firebase.apps?.length
-    ? window.firebase.apps[0]
-    : window.firebase.initializeApp(cfg);
-  const auth = window.firebase.auth(app);
+  // Initialize only once
+  if (!window._fbApp) {
+    window._fbApp = window.firebase.initializeApp(cfg);
+  }
+  const auth = window.firebase.auth(window._fbApp);
   const provider = new window.firebase.auth.GoogleAuthProvider();
-  const result = await auth.signInWithPopup(provider);
-  return { uid: result.user.uid, name: result.user.displayName, email: result.user.email };
+  provider.setCustomParameters({ prompt: 'select_account' });
+  try {
+    const result = await auth.signInWithPopup(provider);
+    return { uid: result.user.uid, name: result.user.displayName, email: result.user.email };
+  } catch(e) {
+    // Translate Firebase auth errors to readable messages
+    if (e.code === 'auth/popup-blocked')    throw new Error('Popup was blocked. Please allow popups for this site and try again.');
+    if (e.code === 'auth/popup-closed-by-user') throw new Error('Sign-in was cancelled.');
+    if (e.code === 'auth/unauthorized-domain') throw new Error('This domain is not authorised in Firebase. Add it in Firebase Console → Authentication → Authorized domains.');
+    throw new Error(e.message || 'Sign-in failed.');
+  }
 }
 
 /* Save user attendance data to Firestore under their UID */
@@ -399,26 +407,30 @@ function Spinner({color}){ return <span style={{width:14,height:14,borderRadius:
    WELCOME SCREEN — shown once on first visit
    ════════════════════════════════════════════════════════════════════════════ */
 function WelcomeScreen({onDone, t}) {
-  const [name,   setName]   = useState('');
-  const [batch,  setBatch]  = useState('');
-  const [step,   setStep]   = useState('form');   // 'form' | 'signing' | 'out'
-  const [err,    setErr]    = useState('');
+  const [name,      setName]      = useState('');
+  const [batch,     setBatch]     = useState('');
+  const [step,      setStep]      = useState('form'); // 'form'|'out'
+  const [err,       setErr]       = useState('');
   const [signingIn, setSigningIn] = useState(false);
   const nameRef = useRef(null);
 
-  useEffect(()=>{ setTimeout(()=>nameRef.current?.focus(), 400); },[]);
+  useEffect(()=>{ setTimeout(()=>nameRef.current?.focus(), 300); },[]);
 
   function validate() {
     if (!name.trim()) { setErr('Please enter your name.'); return false; }
     if (!batch)       { setErr('Please select your batch.'); return false; }
-    return true;
+    setErr(''); return true;
+  }
+
+  function triggerOut(profile, user) {
+    setStep('out');
+    setTimeout(()=> onDone(profile, user), 350);
   }
 
   function continueAsGuest() {
     if (!validate()) return;
     const profile = { name: name.trim(), batch, uid: null, setupDone: true };
-    saveProfile(profile);
-    saveAuth(null);
+    saveProfile(profile); saveAuth(null);
     triggerOut(profile, null);
   }
 
@@ -427,99 +439,108 @@ function WelcomeScreen({onDone, t}) {
     setSigningIn(true); setErr('');
     try {
       const user = await signInWithGoogle();
-      const profile = { name: user.name || name.trim(), batch, uid: user.uid, setupDone: true };
-      saveProfile(profile);
-      saveAuth(user);
+      // Use entered name (not Google name) as user requested
+      const profile = { name: name.trim(), batch, uid: user.uid, setupDone: true };
+      saveProfile(profile); saveAuth(user);
       triggerOut(profile, user);
     } catch(e) {
-      setErr('Google sign-in failed. Try again or continue as guest.');
+      setErr(e.message || 'Sign-in failed. Try again or continue as guest.');
       setSigningIn(false);
     }
   }
 
-  function triggerOut(profile, user) {
-    setStep('out');
-    setTimeout(()=> onDone(profile, user), 400);
-  }
-
-  const canSubmit = name.trim() && batch;
+  const filled = name.trim() && batch;
 
   return (
-    <div style={{position:'fixed',inset:0,background:t.bg,zIndex:999,display:'flex',alignItems:'center',justifyContent:'center',padding:24}}>
-      <div style={{width:'100%',maxWidth:400,animation:step==='out'?'welcomeOut .4s ease forwards':'welcomeIn .5s cubic-bezier(.22,1,.36,1) both'}}>
+    // Backdrop with blur
+    <div style={{position:'fixed',inset:0,zIndex:999,
+      display:'flex',alignItems:'center',justifyContent:'center',padding:20,
+      background:'rgba(0,0,0,0.45)',backdropFilter:'blur(8px)',WebkitBackdropFilter:'blur(8px)'}}>
+
+      {/* Dialog card */}
+      <div style={{width:'100%',maxWidth:380,background:t.surface,borderRadius:24,
+        padding:'32px 28px',boxShadow:'0 32px 80px rgba(0,0,0,.35)',
+        border:`1px solid ${t.border}`,
+        animation:step==='out'?'welcomeOut .35s ease forwards':'welcomeIn .45s cubic-bezier(.22,1,.36,1) both'}}>
 
         {/* Greeting */}
-        <div style={{textAlign:'center',marginBottom:32}}>
-          <div style={{fontSize:52,marginBottom:12}}>👋</div>
-          <h1 style={{fontSize:26,fontWeight:800,letterSpacing:'-.5px',lineHeight:1.2,marginBottom:8}}>Welcome!</h1>
-          <p style={{fontSize:14,opacity:.5,lineHeight:1.6}}>Let's set up your attendance tracker.</p>
+        <div style={{textAlign:'center',marginBottom:28}}>
+          <div style={{fontSize:44,marginBottom:10}}>👋</div>
+          <h1 style={{fontSize:22,fontWeight:800,letterSpacing:'-.4px',lineHeight:1.2,marginBottom:6}}>Welcome!</h1>
+          <p style={{fontSize:13,opacity:.45,lineHeight:1.6}}>Quick setup before you start.</p>
         </div>
 
         {/* Name input */}
-        <div style={{marginBottom:20}}>
-          <input
-            ref={nameRef}
-            type="text"
-            placeholder="Your Name"
-            value={name}
+        <div style={{marginBottom:16}}>
+          <input ref={nameRef} type="text" placeholder="Your Name" value={name}
             onChange={e=>{setName(e.target.value);setErr('');}}
-            onKeyDown={e=>e.key==='Enter'&&canSubmit&&continueAsGuest()}
-            style={{width:'100%',padding:'15px 18px',borderRadius:14,
+            onKeyDown={e=>e.key==='Enter'&&filled&&continueAsGuest()}
+            style={{width:'100%',padding:'13px 16px',borderRadius:12,fontSize:15,fontWeight:500,
               border:`2px solid ${name.trim()?t.accent:t.border}`,
-              background:t.surface,color:t.text,fontSize:16,fontWeight:500,
-              outline:'none',transition:'border-color .2s',
-              boxShadow:name.trim()?`0 0 0 4px ${t.accent}22`:'none'}}/>
+              background:t.borderLight,color:t.text,outline:'none',
+              boxShadow:name.trim()?`0 0 0 3px ${t.accent}22`:'none',
+              transition:'border-color .2s,box-shadow .2s'}}/>
         </div>
 
-        {/* Batch radio buttons */}
-        <div style={{marginBottom:24}}>
-          <div style={{fontSize:13,fontWeight:600,opacity:.5,marginBottom:12,textAlign:'center',letterSpacing:'.3px'}}>SELECT YOUR BATCH</div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12}}>
+        {/* Batch selector */}
+        <div style={{marginBottom:20}}>
+          <div style={{fontSize:11,fontWeight:700,opacity:.4,letterSpacing:'1px',
+            textTransform:'uppercase',marginBottom:10,textAlign:'center'}}>Your Batch</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
             {['B1','B2'].map(b=>(
               <button key={b} onClick={()=>{setBatch(b);setErr('');}}
-                style={{padding:'16px 12px',borderRadius:14,cursor:'pointer',fontWeight:700,fontSize:18,
+                style={{padding:'13px 10px',borderRadius:12,cursor:'pointer',
+                  fontWeight:700,fontSize:16,transition:'all .2s cubic-bezier(.22,1,.36,1)',
                   border:`2px solid ${batch===b?t.accent:t.border}`,
                   background:batch===b?t.accent:t.surface,
                   color:batch===b?'#fff':t.textSub,
-                  boxShadow:batch===b?`0 4px 20px ${t.accent}44`:'none',
-                  transform:batch===b?'scale(1.03)':'scale(1)',
-                  transition:'all .2s cubic-bezier(.22,1,.36,1)'}}>
+                  boxShadow:batch===b?`0 4px 16px ${t.accent}44`:'none',
+                  transform:batch===b?'scale(1.04)':'scale(1)'}}>
                 Batch {b.replace('B','')}
-                {batch===b&&<div style={{fontSize:11,fontWeight:500,marginTop:4,opacity:.8}}>Selected ✓</div>}
+                {batch===b&&<div style={{fontSize:10,fontWeight:500,marginTop:3,opacity:.85}}>✓ Selected</div>}
               </button>
             ))}
           </div>
         </div>
 
         {/* Error */}
-        {err&&<div style={{marginBottom:14,padding:'10px 14px',borderRadius:10,background:t.redBg,color:t.red,fontSize:13,fontWeight:500,textAlign:'center',border:`1px solid ${t.redBorder}`}}>{err}</div>}
+        {err&&<div style={{marginBottom:12,padding:'9px 13px',borderRadius:10,fontSize:12,
+          fontWeight:500,textAlign:'center',background:t.redBg,color:t.red,
+          border:`1px solid ${t.redBorder}`}}>{err}</div>}
 
-        {/* Buttons */}
-        <div style={{display:'flex',flexDirection:'column',gap:10}}>
-          <button onClick={continueAsGuest} disabled={signingIn||!canSubmit}
-            style={{width:'100%',padding:'14px',borderRadius:13,border:'none',
-              background:canSubmit?t.accent:'#ccc',color:'#fff',
-              fontWeight:700,fontSize:15,cursor:canSubmit&&!signingIn?'pointer':'not-allowed',
-              opacity:canSubmit?1:.5,transition:'all .2s',
-              boxShadow:canSubmit?`0 4px 20px ${t.accent}44`:'none'}}>
+        {/* Action buttons — each independently enabled by name+batch */}
+        <div style={{display:'flex',flexDirection:'column',gap:9}}>
+          <button onClick={continueAsGuest} disabled={signingIn}
+            style={{width:'100%',padding:'13px',borderRadius:12,border:'none',
+              background:filled&&!signingIn?t.accent:t.borderLight,
+              color:filled&&!signingIn?'#fff':t.textMuted,
+              fontWeight:700,fontSize:14,cursor:filled&&!signingIn?'pointer':'not-allowed',
+              transition:'all .2s',
+              boxShadow:filled&&!signingIn?`0 4px 16px ${t.accent}44`:'none'}}>
             Continue as Guest →
           </button>
-          <button onClick={handleGoogleSignIn} disabled={signingIn||!canSubmit}
-            style={{width:'100%',padding:'14px',borderRadius:13,
-              border:`2px solid ${t.border}`,background:t.surface,
-              color:t.text,fontWeight:600,fontSize:14,
-              cursor:canSubmit&&!signingIn?'pointer':'not-allowed',
-              opacity:canSubmit?1:.5,display:'flex',alignItems:'center',justifyContent:'center',gap:10,transition:'all .2s'}}>
+          <button onClick={handleGoogleSignIn} disabled={signingIn}
+            style={{width:'100%',padding:'13px',borderRadius:12,
+              border:`2px solid ${filled&&!signingIn?t.border:'transparent'}`,
+              background:filled&&!signingIn?t.surface:t.borderLight,
+              color:filled&&!signingIn?t.text:t.textMuted,
+              fontWeight:600,fontSize:13,cursor:filled&&!signingIn?'pointer':'not-allowed',
+              display:'flex',alignItems:'center',justifyContent:'center',gap:8,transition:'all .2s'}}>
             {signingIn
-              ? <><Spinner color={t.accent}/> Signing in…</>
-              : <><svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/><path fill="none" d="M0 0h48v48H0z"/></svg>
-                Sign in with Google (sync across devices)</>
+              ? <><Spinner color={t.accent}/><span>Signing in…</span></>
+              : <><svg width="16" height="16" viewBox="0 0 48 48" style={{flexShrink:0}}>
+                  <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.08 17.74 9.5 24 9.5z"/>
+                  <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                  <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                  <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.18 1.48-4.97 2.31-8.16 2.31-6.26 0-11.57-3.59-13.46-8.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                </svg>
+                Sign in with Google — sync across devices</>
             }
           </button>
         </div>
 
-        <p style={{textAlign:'center',fontSize:11,opacity:.3,marginTop:16,lineHeight:1.6}}>
-          Guest data stays on this device only.<br/>Sign in with Google to sync across all your devices.
+        <p style={{textAlign:'center',fontSize:11,opacity:.25,marginTop:14,lineHeight:1.6}}>
+          Guest: data stays on this device only.<br/>Google: syncs across all your devices.
         </p>
       </div>
     </div>
