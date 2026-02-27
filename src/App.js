@@ -111,25 +111,49 @@ async function signInWithGoogle() {
 }
 
 /* Save user attendance data to Firestore under their UID */
+/* Get current Firebase ID token for authenticated REST calls */
+async function getIdToken() {
+  if (!window._fbApp) return null;
+  try {
+    const auth = window.firebase.auth(window._fbApp);
+    const user = auth.currentUser;
+    if (!user) return null;
+    return await user.getIdToken();
+  } catch { return null; }
+}
+
+/* Save user attendance data — uses Firebase ID token for auth */
 async function userSave(uid, data) {
-  // User data uses a different write token embedded in the doc
+  const token = await getIdToken();
+  if (!token) throw new Error('Not authenticated');
   const url = `${BASE}/users/${uid}?key=${API_KEY}`;
-  const secured = { ...data, _uwt: uid }; // user's own uid as write token — Rules verify this
-  const body = JSON.stringify({ fields: toFS(secured) });
-  const res = await fetch(url, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body });
+  // Only save the fields we need for sync — skip darkMode (stays per-device)
+  const toSave = {
+    records:           data.records           || {},
+    notes:             data.notes             || {},
+    myBatch:           data.myBatch           || 'B1',
+    holidays:          data.holidays          || {},
+    monthlyAttendance: data.monthlyAttendance || {},
+  };
+  const body = JSON.stringify({ fields: toFS(toSave) });
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    body
+  });
   if (!res.ok) { const e = await res.json(); throw new Error(e.error?.message || res.statusText); }
 }
 
 /* Load user attendance data from Firestore */
 async function userLoad(uid) {
+  const token = await getIdToken();
+  if (!token) return null;
   const url = `${BASE}/users/${uid}?key=${API_KEY}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
   if (res.status === 404) return null;
   if (!res.ok) return null;
   const json = await res.json();
-  const d = fromFS(json.fields);
-  delete d._uwt;
-  return d;
+  return fromFS(json.fields);
 }
 
 /* Poll user data every 15s for cross-device sync */
@@ -137,13 +161,15 @@ function startUserPolling(uid, onChange, intervalMs = 15000) {
   let lastJson = null;
   async function check() {
     try {
+      const token = await getIdToken();
+      if (!token) return;
       const url = `${BASE}/users/${uid}?key=${API_KEY}`;
-      const res = await fetch(url);
+      const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
       if (res.status === 404) return;
       if (!res.ok) return;
       const json = await res.json();
       const str = JSON.stringify(json.fields);
-      if (str !== lastJson) { lastJson = str; const d = fromFS(json.fields); delete d._uwt; onChange(d); }
+      if (str !== lastJson) { lastJson = str; onChange(fromFS(json.fields)); }
     } catch {}
   }
   check();
@@ -1344,11 +1370,6 @@ export default function App() {
     {id:'reports',icon:'📤',label:'Reports'},
   ];
 
-  // Show welcome screen on first visit
-  if(!profile?.setupDone) {
-    return <WelcomeScreen onDone={handleWelcomeDone} t={th}/>;
-  }
-
   return(
     <div style={{minHeight:'100vh',background:th.bg,color:th.text,transition:'background .3s,color .3s'}}>
 
@@ -1430,6 +1451,9 @@ export default function App() {
       {/* ── MODALS ── */}
       {showLogin&&<AdminLogin onSuccess={()=>{setAdminIn(true);setShowLogin(false);setShowPanel(true);}} onClose={()=>setShowLogin(false)} t={th}/>}
       {showPanel&&adminIn&&<AdminPanel onClose={()=>setShowPanel(false)} onLogout={()=>{setAdminIn(false);setShowPanel(false);}} cloudTotals={cloudTotals} t={th}/>}
+
+      {/* ── WELCOME SCREEN — rendered on top of app so blur shows real content behind ── */}
+      {!profile?.setupDone&&<WelcomeScreen onDone={handleWelcomeDone} t={th}/>}
     </div>
   );
 }
