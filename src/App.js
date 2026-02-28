@@ -470,7 +470,10 @@ function WelcomeScreen({onDone, t}) {
       saveProfile(profile); saveAuth(user);
       triggerOut(profile, user);
     } catch(e) {
-      setErr(e.message || 'Sign-in failed. Try again or continue as guest.');
+      // Don't show error if user simply closed/cancelled the popup
+      if (!e.message.includes('cancelled') && !e.message.includes('closed')) {
+        setErr(e.message || 'Sign-in failed. Try again or continue as guest.');
+      }
       setSigningIn(false);
     }
   }
