@@ -347,10 +347,10 @@ function calcStats(records,batch,hols,monthlyAtt){
       const val=dr[`${sl.id}__${i}`];
       if(!val||!st[sl.id]) return;
       if(date<subjectMap[sl.id]?.semStart) return;
+      if(val==='H') { st[sl.id].holiday++; return; } // H = No Class, doesn't affect total or percentage
       st[sl.id].total++;
       if(val==='P') st[sl.id].present++;
       else if(val==='A') st[sl.id].absent++;
-      else if(val==='H') st[sl.id].holiday++;
     });
   });
   Object.values(monthlyAtt||{}).forEach(sd=>{
@@ -417,7 +417,7 @@ function AttTag({val,t}){
   return m?<span style={{background:m.bg,color:m.c,fontWeight:600,fontSize:12,padding:'3px 10px',borderRadius:99}}>{m.l}</span>:null;
 }
 function MarkBtns({value,onChange,t}){
-  return <div style={{display:'flex',gap:6}}>{[['P',t.green,'Present'],['A',t.red,'Absent'],['H',t.amber,'Holiday']].map(([v,col,lbl])=><button key={v} onClick={()=>onChange(value===v?null:v)} title={lbl} style={{width:36,height:36,borderRadius:10,border:'none',cursor:'pointer',fontWeight:700,fontSize:13,fontFamily:"'DM Mono',monospace",background:value===v?col:t.borderLight,color:value===v?'#fff':t.textMuted,transition:'all .15s'}}>{v}</button>)}</div>;
+  return <div style={{display:'flex',gap:6}}>{[['P',t.green,'Present'],['A',t.red,'Absent'],['H',t.amber,'No Class']].map(([v,col,lbl])=><button key={v} onClick={()=>onChange(value===v?null:v)} title={lbl} style={{width:36,height:36,borderRadius:10,border:'none',cursor:'pointer',fontWeight:700,fontSize:13,fontFamily:"'DM Mono',monospace",background:value===v?col:t.borderLight,color:value===v?'#fff':t.textMuted,transition:'all .15s'}}>{v}</button>)}</div>;
 }
 function Card({children,style={},onClick,t}){
   const [hv,setHv]=useState(false);
@@ -1446,7 +1446,7 @@ export default function App() {
       {/* ── LEGEND ── */}
       <div style={{position:'fixed',bottom:12,left:'50%',transform:'translateX(-50%)',display:'flex',flexDirection:'column',alignItems:'center',gap:6,zIndex:100,pointerEvents:'none'}}>
         <div style={{background:th.surface,border:`1px solid ${th.border}`,borderRadius:99,padding:'8px 20px',display:'flex',gap:16,boxShadow:'0 4px 20px rgba(0,0,0,.12)',fontSize:12,fontWeight:600,whiteSpace:'nowrap',transition:'background .3s,border-color .3s',pointerEvents:'auto'}}>
-          <span style={{color:th.green}}>P = Present</span><span style={{color:th.red}}>A = Absent</span><span style={{color:th.amber}}>H = Holiday</span>
+          <span style={{color:th.green}}>P = Present</span><span style={{color:th.red}}>A = Absent</span><span style={{color:th.amber}}>H = No Class</span>
         </div>
         <div style={{fontSize:11,fontWeight:500,opacity:.4,whiteSpace:'nowrap'}}>Made with ❤️ by Ajay G</div>
       </div>
