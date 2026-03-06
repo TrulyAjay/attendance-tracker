@@ -283,9 +283,9 @@ const SUBJECTS = [
   {id:'IND_CONST',    name:'Indian Constitution',                    abbr:'IND. CONST.',   teacher:'Vineeta Kumari (VK)',                         type:'theory',   color:'#d97706',semStart:'2026-02-02'},
   {id:'ENGG_WORK',    name:'Engineering Workshop Practice',          abbr:'ENGG. WORK.',   teacher:'Manish Bhaskar (MB) & Pradeep Patanwar (PP)',type:'lab',      color:'#db2777',semStart:'2026-02-02'},
   {id:'COMP_PROG_LAB',name:'Computer Programming Lab',               abbr:'CP LAB',        teacher:'Vaibhav Kant Singh (VKS)',                    type:'lab',      color:'#2563eb',semStart:'2026-01-27'},
-  {id:'IEE_LAB',      name:'IEE Lab',                               abbr:'IEE LAB',       teacher:'Manoj Gupta (MG)',                            type:'lab',      color:'#0891b2',semStart:'2026-02-02'},
+  {id:'IEE_LAB',      name:'IEE Lab',                                abbr:'IEE LAB',       teacher:'Manoj Gupta (MG)',                            type:'lab',      color:'#0891b2',semStart:'2026-02-02'},
   {id:'ENGG_CHEM_LAB',name:'Engineering Chemistry Lab',              abbr:'CHEM LAB',      teacher:'Nidhi Rai (NR) & B. Mandal (BM)',            type:'lab',      color:'#e11d48',semStart:'2026-02-02'},
-  {id:'SPORTS_YOGA',  name:'Sports & Yoga',                         abbr:'SPORTS & YOGA', teacher:'Ratin Jogi',                                 type:'activity', color:'#16a34a',semStart:'2026-02-02'},
+  {id:'SPORTS_YOGA',  name:'Sports & Yoga',                          abbr:'SPORTS & YOGA', teacher:'Ratin Jogi',                                 type:'activity', color:'#16a34a',semStart:'2026-02-02'},
 ];
 const SEM_END='2026-04-30';
 const MIN_ATT=75;
@@ -294,10 +294,10 @@ const subjectMap=Object.fromEntries(SUBJECTS.map(s=>[s.id,s]));
 /* ── TIMETABLE ─────────────────────────────────────────────────────────────── */
 const TT = {
   MON:[{id:'COMP_PROG',time:'10–11',startH:10,batch:'all'},{id:'ENV_SCIENCE',time:'11–12',startH:11,batch:'all'},{id:'ENGG_CHEM',time:'12–13',startH:12,batch:'all'},{id:'ENGG_CHEM_LAB',time:'14–16',startH:14,batch:'B1'},{id:'SPORTS_YOGA',time:'16–18',startH:16,batch:'all'}],
-  TUE:[{id:'IEE',time:'10–11',startH:10,batch:'all'},{id:'ENGG_MATHS',time:'11–12',startH:11,batch:'all'},{id:'ENGG_CHEM',time:'12–13',startH:12,batch:'all'},{id:'COMP_PROG',time:'14–16',startH:14,batch:'B1'},{id:'IEE_LAB',time:'14–16',startH:14,batch:'B2'},{id:'COMP_PROG_LAB',time:'16–18',startH:16,batch:'B2'}],
+  TUE:[{id:'IEE',time:'10–11',startH:10,batch:'all'},{id:'ENGG_MATHS',time:'11–12',startH:11,batch:'all'},{id:'ENGG_CHEM',time:'12–13',startH:12,batch:'all'},{id:'COMP_PROG_LAB',time:'14–16',startH:14,batch:'B1'},{id:'IEE_LAB',time:'14–16',startH:14,batch:'B2'},{id:'COMP_PROG_LAB',time:'16–18',startH:16,batch:'B2'}],
   WED:[{id:'COMP_PROG',time:'10–11',startH:10,batch:'all'},{id:'ENGG_MATHS',time:'11–12',startH:11,batch:'all'},{id:'IEE',time:'12–13',startH:12,batch:'all'},{id:'IEE_LAB',time:'14–16',startH:14,batch:'B1'},{id:'ENGG_WORK',time:'16–18',startH:16,batch:'B2'}],
   THU:[{id:'ENV_SCIENCE',time:'10–11',startH:10,batch:'all'},{id:'ENGG_MATHS',time:'11–12',startH:11,batch:'all'},{id:'ENGG_CHEM',time:'12–13',startH:12,batch:'all'},{id:'ENGG_WORK',time:'14–16',startH:14,batch:'B1'},{id:'ENGG_CHEM_LAB',time:'14–16',startH:14,batch:'B2'}],
-  FRI:[{id:'COMP_PROG',time:'10–11',startH:10,batch:'all'},{id:'ENGG_MATHS',time:'11–12',startH:11,batch:'all'},{id:'IEE',time:'12–13',startH:12,batch:'all'},{id:'IND_CONST',time:'14–15',startH:14,batch:'all'},{id:'ENGG_WORK',time:'16–18',startH:16,batch:'all'}],
+  FRI:[{id:'COMP_PROG',time:'10–11',startH:10,batch:'all'},{id:'ENGG_MATHS',time:'11–12',startH:11,batch:'all'},{id:'IEE',time:'12–13',startH:12,batch:'all'},{id:'IND_CONST',time:'14–15',startH:14,batch:'all'}],
 };
 const DAYS=['MON','TUE','WED','THU','FRI'];
 
